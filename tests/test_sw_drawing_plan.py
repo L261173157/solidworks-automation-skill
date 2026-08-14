@@ -15,10 +15,14 @@ from sw_drawing_plan import (  # noqa: E402
     PAPER_SIZES,
     assign_overall_tolerances,
     build_technical_requirements,
+    fit_tolerance,
+    gb1804_band,
     plan_manufacturing_drawing,
     scale_ratio_text,
     select_paper_and_scale,
+    suggest_fit_for_hole,
 )
+from sw_drawing import gb1804m_band  # noqa: E402
 
 
 def _evidence(width, height, depth, part_path=r"D:\parts\bracket.SLDPRT", **extra):
@@ -105,15 +109,6 @@ class TestPlanManufacturingDrawing(unittest.TestCase):
         plan = plan_manufacturing_drawing(evidence)
         self.assertNotIn("重量", plan["title_block"]["fields"])
 
-    def test_holes_become_review_required_mating_candidates(self):
-        evidence = _evidence(60, 10.5, 40, holes=[{"diameter_mm": 8.5}, {"diameter_mm": None}])
-        plan = plan_manufacturing_drawing(evidence)
-        candidates = plan["mating_dimension_candidates"]
-        self.assertEqual(len(candidates), 1)
-        self.assertEqual(candidates[0]["diameter_mm"], 8.5)
-        self.assertIsNone(candidates[0]["suggestion"])
-        self.assertTrue(candidates[0]["review_required"])
-
     def test_missing_part_path_blocks_plan(self):
         plan = plan_manufacturing_drawing(_evidence(60, 10.5, 40, part_path=""))
         self.assertEqual(plan["status"], "blocked")
@@ -155,9 +150,86 @@ class TestPlanManufacturingDrawing(unittest.TestCase):
         self.assertEqual(scale_ratio_text(0.5), "1:2")
         self.assertEqual(scale_ratio_text(1.0), "1:1")
 
-    def test_assign_overall_tolerances_rejects_unimplemented_grades(self):
+    def test_assign_overall_tolerances_support_all_grades(self):
+        entries = {item["id"]: item for item in assign_overall_tolerances(
+            {"width_mm": 10, "height_mm": 10, "depth_mm": 10}, grade="f")}
+        self.assertEqual(entries["W"]["tolerance"]["plus_mm"], 0.1)  # f 级 ≤6 之后到 30 为 0.1
+        self.assertEqual(entries["W"]["tolerance"]["source"], "gb1804-f")
         with self.assertRaises(ValueError):
-            assign_overall_tolerances({"width_mm": 10, "height_mm": 10, "depth_mm": 10}, grade="f")
+            assign_overall_tolerances({"width_mm": 10, "height_mm": 10, "depth_mm": 10}, grade="x")
+
+    def test_gb1804_grade_table_matches_standard_and_m_baseline(self):
+        # f/m/c/v 抽查值(GB/T 1804-2000 线性尺寸)。
+        self.assertEqual(gb1804_band(2, "f"), 0.05)
+        self.assertEqual(gb1804_band(50, "f"), 0.15)
+        self.assertEqual(gb1804_band(2, "c"), 0.2)
+        self.assertEqual(gb1804_band(50, "c"), 0.8)
+        self.assertEqual(gb1804_band(50, "v"), 1.5)
+        self.assertEqual(gb1804_band(1500, "v"), 6.0)
+        # m 级与 sw_drawing.gb1804m_band(SW2024 真机回归基线)全区间一致。
+        for value in (3, 6.01, 29, 45, 120, 250, 400, 401, 1000):
+            self.assertEqual(gb1804_band(value, "m"), gb1804m_band(value))
+        with self.assertRaises(ValueError):
+            gb1804_band(10, "x")
+
+    def test_fit_tolerance_lookup_common_fits(self):
+        h7 = fit_tolerance(10, "H7")
+        self.assertEqual((h7["plus_mm"], h7["minus_mm"]), (0.015, 0.0))
+        g6 = fit_tolerance(10, "g6")
+        self.assertEqual((g6["plus_mm"], g6["minus_mm"]), (-0.005, -0.014))
+        h6 = fit_tolerance(25, "h6")
+        self.assertEqual((h6["plus_mm"], h6["minus_mm"]), (0.0, -0.013))
+        h11 = fit_tolerance(8, "H11")
+        self.assertEqual((h11["plus_mm"], h11["minus_mm"]), (0.09, 0.0))
+        self.assertEqual(h7["standard"], "GB/T 1800.1-2009")
+
+    def test_fit_tolerance_out_of_range_returns_none(self):
+        self.assertIsNone(fit_tolerance(2, "H7"))
+        self.assertIsNone(fit_tolerance(300, "H7"))
+        with self.assertRaises(ValueError):
+            fit_tolerance(10, "K7")
+
+    def test_suggest_fit_defaults_h7_and_always_requires_review(self):
+        suggestion = suggest_fit_for_hole(8.5)
+        self.assertEqual(suggestion["suggestion"], "H7")
+        self.assertEqual(suggestion["tolerance"]["plus_mm"], 0.015)
+        self.assertTrue(suggestion["review_required"])
+        out_of_range = suggest_fit_for_hole(300)
+        self.assertIsNone(out_of_range["suggestion"])
+        self.assertTrue(out_of_range["review_required"])
+        self.assertIn("人工", out_of_range["reason"])
+        disabled = suggest_fit_for_hole(8.5, default_fit=None)
+        self.assertIsNone(disabled)
+
+    def test_holes_become_review_required_mating_candidates(self):
+        evidence = _evidence(60, 10.5, 40, holes=[{"diameter_mm": 8.5}, {"diameter_mm": None}])
+        plan = plan_manufacturing_drawing(evidence)
+        candidates = plan["mating_dimension_candidates"]
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0]["diameter_mm"], 8.5)
+        self.assertEqual(candidates[0]["suggestion"], "H7")
+        self.assertTrue(candidates[0]["review_required"])
+
+    def test_fit_suggestion_can_be_disabled_or_out_of_range(self):
+        evidence = _evidence(60, 10.5, 40, holes=[{"diameter_mm": 300}])
+        plan = plan_manufacturing_drawing(evidence)
+        candidate = plan["mating_dimension_candidates"][0]
+        self.assertIsNone(candidate["suggestion"])
+        plan_off = plan_manufacturing_drawing(
+            _evidence(60, 10.5, 40, holes=[{"diameter_mm": 8.5}]),
+            options={"fit_suggestion": None},
+        )
+        self.assertIsNone(plan_off["mating_dimension_candidates"][0]["suggestion"])
+
+    def test_grade_f_flows_through_plan(self):
+        plan = plan_manufacturing_drawing(_evidence(60, 10.5, 40), options={"grade": "f"})
+        self.assertEqual(plan["tolerance_grade"], "f")
+        self.assertEqual(plan["dimensioning"]["overall_dimensions"][0]["tolerance"]["source"], "gb1804-f")
+        self.assertEqual(plan["technical_requirements"]["lines"][0], "未注公差按 GB/T 1804-f。")
+
+    def test_unknown_grade_blocks_plan(self):
+        plan = plan_manufacturing_drawing(_evidence(60, 10.5, 40), options={"grade": "x"})
+        self.assertEqual(plan["status"], "blocked")
 
     def test_build_technical_requirements_dedupes_blank_lines(self):
         lines = build_technical_requirements(["", "  ", "调质 28~32HRC。"])

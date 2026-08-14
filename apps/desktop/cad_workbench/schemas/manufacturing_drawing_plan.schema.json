@@ -142,7 +142,7 @@
                   "minus_mm": { "type": "number", "minimum": 0 },
                   "source": {
                     "type": "string",
-                    "enum": ["gb1804-m", "fit_suggestion", "explicit"]
+                    "enum": ["gb1804-f", "gb1804-m", "gb1804-c", "gb1804-v", "fit_suggestion", "explicit"]
                   },
                   "grade": { "type": "string" }
                 }

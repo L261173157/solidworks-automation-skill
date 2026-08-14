@@ -55,24 +55,45 @@ dimension.SetToleranceValues(plus_m, minus_m)     # float, float —— 单位�
 | > 120 ～ ≤ 400 | ±0.5 |
 | > 400 | ±0.8 |
 
-> 这是 GB/T 1804 一般公差的“中等级 m”。未注公差的线性尺寸默认套用此表；精密或粗加工
-> 场合可改用 f（精密）/c（粗糙）/v（最粗）等级，但本封装只内置 m。
+> 这是 GB/T 1804 一般公差的“中等级 m”。未注公差的线性尺寸默认套用此表;精密或粗加工
+> 场合可改用 f(精密)/c(粗糙)/v(最粗)等级。**COM 层封装(`sw_drawing`)只内置 m**;
+> 四等级分档在计划层 `sw_drawing_plan.gb1804_band(nominal_mm, grade)` 提供
+> (m 级与 COM 层保持一致,v 级对 0.5~3mm 标准无定义,并入 3~6 档保守取值)。
 
-## 技能封装（`scripts/sw_drawing.py`）
+## GB/T 1800.1 常用配合(计划层,一律人工确认)
+
+`sw_drawing_plan.fit_tolerance(diameter_mm, fit)` 收录基孔制孔 H7/H11 与轴 g6/h6
+的上下偏差(3~250mm 常用段);`suggest_fit_for_hole(d)` 默认建议 H7 并强制
+`review_required` —— 孔的用途(轴承位/螺栓过孔/铰制孔)只有设计意图能判定,
+建议只是待确认起点。超出常用段返回 None,不外推。配合代号仅落到计划
+(`mating_dimension_candidates`),写入图纸仍须人工确认后走
+`set_dimension_tolerance(tol_type=5, plus_mm=…, minus_mm=…)`。
+
+## 技能封装(`scripts/sw_drawing.py` 与 `scripts/sw_drawing_plan.py`)
 
 ```python
 from sw_drawing import gb1804m_band, set_dimension_tolerance, apply_gb1804m
+from sw_drawing_plan import gb1804_band, fit_tolerance, suggest_fit_for_hole
 
-# 纯查表（可单测）
-band_mm = gb1804m_band(nominal_mm=45)        # -> 0.2
+# 纯查表(可单测)
+band_mm = gb1804m_band(nominal_mm=45)        # -> 0.2(COM 层,恒 m 级)
+band_f = gb1804_band(45, grade="f")          # -> 0.15(计划层四等级)
 
-# 显式对称 ±：plus/minus 留空时按 GB/T 1804-m 自动分档
+# 配合表(GB/T 1800.1,mm)
+fit_tolerance(10, "H7")   # -> {plus_mm: 0.015, minus_mm: 0.0, ...}
+fit_tolerance(10, "g6")   # -> {plus_mm: -0.005, minus_mm: -0.014, ...}
+fit_tolerance(300, "H7")  # -> None(超出常用段,人工选用)
+
+# 孔配合建议(默认 H7,一律 review_required)
+suggest_fit_for_hole(8.5)  # -> {suggestion: "H7", tolerance: {...}, review_required: True}
+
+# 显式对称 ±:plus/minus 留空时按 GB/T 1804-m 自动分档
 report = set_dimension_tolerance(display_dimension, nominal_mm=45.0)   # ±0.2
 
-# 便捷封装：直接套 GB/T 1804-m 对称公差
+# 便捷封装:直接套 GB/T 1804-m 对称公差
 report = apply_gb1804m(display_dimension, nominal_mm=45.0)
 
-# 显式上下限（双向，tol_type=5）
+# 显式上下限(双向,tol_type=5)
 report = set_dimension_tolerance(
     display_dimension, nominal_mm=45.0, tol_type=5, plus_mm=0.2, minus_mm=0.1,
 )

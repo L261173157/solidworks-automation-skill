@@ -281,7 +281,7 @@
       "verified_versions": ["2024"],
       "dependencies": ["SolidWorks", "pywin32"],
       "limitations": [
-        "通过 IDimension.SetToleranceType + SetToleranceValues 设置对称（±）或上下限公差；GB/T 1804-m 通用公差按名义尺寸分档（≤6±0.1 / ≤30±0.2 / ≤120±0.3 / ≤400±0.5 / >400±0.8）",
+        "通过 IDimension.SetToleranceType + SetToleranceValues 设置对称（±）或上下限公差；GB/T 1804-m 通用公差按名义尺寸分档（≤6±0.1 / ≤30±0.2 / ≤120±0.3 / ≤400±0.5 / >400±0.8）；COM 层仅内置 m 级，f/c/v 四等级分档与 GB/T 1800.1 常用配合（H7/g6/h6/H11，3~250mm）由计划层 sw_drawing_plan.gb1804_band/fit_tolerance/suggest_fit_for_hole 提供，配合建议默认 H7 且一律 review_required",
         "公差值单位为米；带宽按已知名义尺寸查表，不读尺寸回读值（GetValue2/SystemValue 单位不一致会错档）；必须用 SetToleranceType 方法启用显示，ITolerance.Type 属性赋值只写数据不渲染",
         "SW2024 已在 5 个自制件工程图上连续回归（每张 W/H/D 三向 ±GB/T 1804-m）；仅覆盖尺寸公差，GD&T 几何公差框仍为 reference_only，关键配合公差须人工标注复核"
       ],
@@ -337,10 +337,10 @@
       "verified_versions": [],
       "dependencies": ["SolidWorks", "pywin32"],
       "limitations": [
-        "三段管线：sw_drawing_plan 纯计划（图幅/比例/第一角布局/GB/T 1804-m 公差/标题栏/技术要求）→ sw_drawing.generate_manufacturing_drawing 执行 → sw_review.review_manufacturing_drawing 审查；计划与 schema 契约 apps/desktop/cad_workbench/schemas/manufacturing_drawing_plan.schema.json 对齐",
+        "三段管线：sw_drawing_plan 纯计划（图幅/比例/第一角布局/GB/T 1804 f/m/c/v 公差/标题栏/技术要求/孔配合建议）→ sw_drawing.generate_manufacturing_drawing 执行 → sw_review.review_manufacturing_drawing 审查；计划与 schema 契约 apps/desktop/cad_workbench/schemas/manufacturing_drawing_plan.schema.json 对齐",
         "视图比例 <1:2 时坐标扫描标注不可用（SW 不暴露可点选边），计划层自动升图幅至放得下为止；升到 A0 仍不足则降级仅模型尺寸并 review_required",
         "标题栏优先探测 $PRP 属性联动自动填充，GB 官方模板单元格为空时退回左上角文字注释克位（SW2024 实证兜底）；图框内容合规始终需人工目视复核",
-        "技术要求为默认模板行+用户增补；孔配合建议（H7 等）与 GD&T 不在本能力内；产物四件套 slddrw/pdf/preview_png/review_report 对齐 golden-workflows engineering_drawing 契约；尚未完成真机回归"
+        "技术要求为默认模板行+用户增补；孔配合建议默认 H7（GB/T 1800.1 常用段 3~250mm，不判断孔用途，一律 review_required 须人工确认）；GD&T 不在本能力内；产物四件套 slddrw/pdf/preview_png/review_report 对齐 golden-workflows engineering_drawing 契约；尚未完成真机回归"
       ],
       "allowed_modes": ["interactive", "reviewed"]
     }

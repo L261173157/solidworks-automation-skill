@@ -19,14 +19,12 @@ try:
         PAPER_SIZES,
         STANDARD_DRAWING_SCALES,
         PICKABILITY_THRESHOLD_SCALE,
-        gb1804m_band,
     )
 except ImportError:
     from sw_drawing import (
         PAPER_SIZES,
         STANDARD_DRAWING_SCALES,
         PICKABILITY_THRESHOLD_SCALE,
-        gb1804m_band,
     )
 
 PLAN_SCHEMA_VERSION = "manufacturing_drawing_plan/1.0"
@@ -54,6 +52,98 @@ DEFAULT_TECHNICAL_REQUIREMENTS = (
     "未注公差按 GB/T 1804-{grade}。",
     "锐边去毛刺。",
 )
+
+# GB/T 1804-2000 线性尺寸未注公差分档表(上界 mm, 对称 ± mm)。
+# m 级 >400 档按 0.8 保守延伸,与 sw_drawing.gb1804m_band(SW2024 真机回归)一致;
+# v 级对 0.5~3mm 标准无定义,并入 3~6 档保守取值 0.5。
+_GB1804_BANDS = {
+    "f": ((3.0, 0.05), (6.0, 0.05), (30.0, 0.1), (120.0, 0.15), (400.0, 0.2), (1000.0, 0.3), (float("inf"), 0.5)),
+    "m": ((6.0, 0.1), (30.0, 0.2), (120.0, 0.3), (400.0, 0.5), (float("inf"), 0.8)),
+    "c": ((3.0, 0.2), (6.0, 0.3), (30.0, 0.5), (120.0, 0.8), (400.0, 1.2), (1000.0, 2.0), (float("inf"), 3.0)),
+    "v": ((6.0, 0.5), (30.0, 1.0), (120.0, 1.5), (400.0, 2.5), (1000.0, 4.0), (float("inf"), 6.0)),
+}
+
+# GB/T 1800.1-2009 常用配合偏差表(名义直径上界 mm, 上偏差 mm, 下偏差 mm)。
+# 最小实用集:H7(基孔制孔,轴承位/精密间隙)、g6/h6(轴)、H11(铰制/粗装配孔)。
+# 仅覆盖 3~250mm 常用段;建议一律 review_required,不替代工程师配合选用。
+_GB1800_FITS = {
+    "H7": ((6.0, 0.012, 0.0), (10.0, 0.015, 0.0), (18.0, 0.018, 0.0), (30.0, 0.021, 0.0),
+           (50.0, 0.025, 0.0), (80.0, 0.030, 0.0), (120.0, 0.035, 0.0), (180.0, 0.040, 0.0),
+           (250.0, 0.046, 0.0)),
+    "g6": ((6.0, -0.004, -0.012), (10.0, -0.005, -0.014), (18.0, -0.006, -0.017),
+           (30.0, -0.007, -0.020), (50.0, -0.009, -0.025), (80.0, -0.010, -0.029),
+           (120.0, -0.012, -0.034), (180.0, -0.014, -0.039), (250.0, -0.015, -0.044)),
+    "h6": ((6.0, 0.0, -0.008), (10.0, 0.0, -0.009), (18.0, 0.0, -0.011), (30.0, 0.0, -0.013),
+           (50.0, 0.0, -0.016), (80.0, 0.0, -0.019), (120.0, 0.0, -0.022), (180.0, 0.0, -0.025),
+           (250.0, 0.0, -0.029)),
+    "H11": ((6.0, 0.075, 0.0), (10.0, 0.090, 0.0), (18.0, 0.110, 0.0), (30.0, 0.130, 0.0),
+            (50.0, 0.160, 0.0), (80.0, 0.190, 0.0), (120.0, 0.220, 0.0), (180.0, 0.250, 0.0),
+            (250.0, 0.290, 0.0)),
+}
+
+FIT_MIN_DIAMETER_MM = 3.0
+FIT_MAX_DIAMETER_MM = 250.0
+
+
+def gb1804_band(nominal_mm, grade="m"):
+    """@brief GB/T 1804 未注公差按名义尺寸与等级(f/m/c/v)线性分档,返回对称 ±(mm)。
+
+    纯查表;m 级与 sw_drawing.gb1804m_band 保持一致(SW2024 真机回归基线)。
+    """
+    if grade not in _GB1804_BANDS:
+        raise ValueError(f"未知 GB/T 1804 等级: {grade}(支持 f/m/c/v)")
+    n = abs(float(nominal_mm))
+    for upper, band in _GB1804_BANDS[grade]:
+        if n <= upper:
+            return band
+    return _GB1804_BANDS[grade][-1][1]
+
+
+def fit_tolerance(diameter_mm, fit_code):
+    """@brief GB/T 1800.1 常用配合(H7/g6/h6/H11)按名义直径查上/下偏差(mm)。
+
+    超出 3~250mm 常用段时返回 None——配合表不外推,须人工按标准选用。
+    """
+    if fit_code not in _GB1800_FITS:
+        raise ValueError(f"未收录配合代号: {fit_code}(支持 {'/'.join(_GB1800_FITS)})")
+    d = abs(float(diameter_mm))
+    if d < FIT_MIN_DIAMETER_MM or d > FIT_MAX_DIAMETER_MM:
+        return None
+    for upper, plus, minus in _GB1800_FITS[fit_code]:
+        if d <= upper:
+            return {
+                "fit": fit_code,
+                "plus_mm": plus,
+                "minus_mm": minus,
+                "standard": "GB/T 1800.1-2009",
+                "diameter_band_max_mm": upper,
+            }
+    return None
+
+
+def suggest_fit_for_hole(hole_diameter_mm, *, default_fit="H7"):
+    """@brief 为 B-Rep 检测孔给出配合建议(默认 H7),一律 review_required。
+
+    建议是"待人工确认的起点"而非结论:孔的用途(轴承位/螺栓过孔/铰制孔)只有
+    设计意图能判定;超出常用段不给建议。
+    """
+    if default_fit is None:
+        return None
+    tolerance = fit_tolerance(hole_diameter_mm, default_fit)
+    if tolerance is None:
+        return {
+            "diameter_mm": float(hole_diameter_mm),
+            "suggestion": None,
+            "reason": "直径超出 GB/T 1800.1 常用配合表(3~250mm),须人工选用",
+            "review_required": True,
+        }
+    return {
+        "diameter_mm": float(hole_diameter_mm),
+        "suggestion": default_fit,
+        "tolerance": tolerance,
+        "rationale": "默认建议,用途(轴承位/过孔/铰制孔)须按设计意图人工确认",
+        "review_required": True,
+    }
 
 
 def _scale_ratio(scale):
@@ -195,15 +285,13 @@ def select_paper_and_scale(nominal, *, preferred_paper="A3", allow_upsize=True,
 def assign_overall_tolerances(nominal, *, grade="m"):
     """@brief 为 W/H/D 总体尺寸分配 GB/T 1804 对称 ± 公差条目。
 
-    带宽按外部已知名义尺寸查表(不读尺寸回读值,单位不一致会错档)。
-    当前仅内置 m 级;f/c/v 等级属公差智能化阶段。
+    带宽按外部已知名义尺寸查表(不读尺寸回读值,单位不一致会错档),
+    等级 f/m/c/v 可选,默认 m。
     """
-    if grade != "m":
-        raise ValueError("当前仅支持 GB/T 1804-m;f/c/v 等级尚未实现。")
     entries = []
     for dim_id, key in (("W", "width_mm"), ("H", "height_mm"), ("D", "depth_mm")):
         value = nominal[key]
-        band = gb1804m_band(value)
+        band = gb1804_band(value, grade)
         entries.append({
             "id": dim_id,
             "nominal_mm": value,
@@ -211,7 +299,7 @@ def assign_overall_tolerances(nominal, *, grade="m"):
                 "type": "symmetric",
                 "plus_mm": band,
                 "minus_mm": band,
-                "source": "gb1804-m",
+                "source": f"gb1804-{grade}",
                 "grade": grade,
             },
         })
@@ -291,7 +379,13 @@ def plan_manufacturing_drawing(evidence, frame_spec=None, options=None):
         "图幅受支持",
         f"未知图幅: {preferred_paper}",
     )
-    if not (part_ok and nominal_ok and projection_ok and paper_ok):
+    grade_ok = check(
+        "plan-tolerance-grade",
+        grade in _GB1804_BANDS,
+        "公差等级受支持(f/m/c/v)",
+        f"未知 GB/T 1804 等级: {grade}",
+    )
+    if not (part_ok and nominal_ok and projection_ok and paper_ok and grade_ok):
         return {
             "schema": PLAN_SCHEMA_VERSION,
             "status": "blocked",
@@ -337,6 +431,18 @@ def plan_manufacturing_drawing(evidence, frame_spec=None, options=None):
         frame_spec.get("technical_requirements"),
         grade=grade,
     )
+    default_fit = options.get("fit_suggestion", "H7")
+    mating_candidates = []
+    for item in (evidence.get("holes") or []):
+        diameter = item.get("diameter_mm")
+        if diameter is None:
+            continue
+        suggestion = suggest_fit_for_hole(diameter, default_fit=default_fit)
+        mating_candidates.append({
+            "diameter_mm": float(diameter),
+            "source": "brep_cylindrical_face",
+            **(suggestion or {"suggestion": None, "review_required": True}),
+        })
 
     plan = {
         "schema": PLAN_SCHEMA_VERSION,
@@ -362,16 +468,7 @@ def plan_manufacturing_drawing(evidence, frame_spec=None, options=None):
             "strategy": strategy,
             "overall_dimensions": overall,
         },
-        "mating_dimension_candidates": [
-            {
-                "diameter_mm": item.get("diameter_mm"),
-                "source": "brep_cylindrical_face",
-                "suggestion": None,
-                "review_required": True,
-            }
-            for item in (evidence.get("holes") or [])
-            if item.get("diameter_mm") is not None
-        ],
+        "mating_dimension_candidates": mating_candidates,
         "title_block": {"fields": title_fields, "auto_fields": auto_fields},
         "technical_requirements": {"lines": technical_requirements},
         "tolerance_grade": grade,
@@ -382,7 +479,7 @@ def plan_manufacturing_drawing(evidence, frame_spec=None, options=None):
         "limitations": [
             "计划仅描述意图;尺寸位置、重叠和尺寸链完整性须以导出 PDF/BMP 目视复核",
             "W/H/D 为包络总体尺寸,内部特征定位尺寸须由模型尺寸路线或人工补齐",
-            "孔配合建议(如 H7)为二期公差智能化能力,当前一律 review_required",
+            "孔配合建议默认 H7(GB/T 1800.1 常用段 3~250mm),不判断孔用途,一律 review_required 须人工确认",
         ],
     }
     if strategy == "model_only":
