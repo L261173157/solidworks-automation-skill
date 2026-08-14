@@ -136,6 +136,8 @@ claude mcp add --scope user solidworks -- python C:\path\to\solidworks-automatio
 | `solidworks_add_rotary_motor` | 在活动装配体中新建 Motion Study 并添加匀速旋转马达 | 是 |
 | `solidworks_inspect_motion_studies` | 读取算例、马达/外力数量和结果新鲜度 | 否 |
 | `solidworks_validate_motion_study` | 对时长、类型、马达数量、结果存在性和过期状态执行交付门禁 | 否 |
+| `solidworks_plan_manufacturing_drawing` | 只读采集三维证据（W/H/D、质量、孔），返回可审计的制造零件图计划（图幅/比例/公差/标题栏） | 否 |
+| `solidworks_create_manufacturing_drawing` | 端到端生成 GB 制造零件图：图框+标题栏、第一角三视图、W/H/D 标注+GB/T 1804 公差、技术要求、PDF 导出与三重证据审查 | 是，写输出文件 |
 
 ## 基础装配工具示例
 

@@ -55,6 +55,8 @@ REQUIRED_TOOLS = {
     "solidworks_add_rotary_motor",
     "solidworks_inspect_motion_studies",
     "solidworks_validate_motion_study",
+    "solidworks_plan_manufacturing_drawing",
+    "solidworks_create_manufacturing_drawing",
 }
 
 

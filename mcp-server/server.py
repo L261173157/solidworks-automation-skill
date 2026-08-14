@@ -54,6 +54,10 @@ def _load_automation_modules() -> None:
     holes = importlib.import_module("scripts.sw_hole_features")
     document_data = importlib.import_module("scripts.sw_document_data")
     delivery = importlib.import_module("scripts.sw_delivery")
+    drawing_plan = importlib.import_module("scripts.sw_drawing_plan")
+    drawing = importlib.import_module("scripts.sw_drawing")
+    inspect_module = importlib.import_module("scripts.sw_inspect")
+    mass_module = importlib.import_module("scripts.sw_mass_properties")
 
     exports = {
         "connect_solidworks": connect.connect_solidworks,
@@ -105,6 +109,11 @@ def _load_automation_modules() -> None:
         "create_counterbore_hole": holes.create_counterbore_hole,
         "create_countersink_hole": holes.create_countersink_hole,
         "create_semicircular_slot": holes.create_semicircular_slot,
+        "plan_manufacturing_drawing": drawing_plan.plan_manufacturing_drawing,
+        "generate_manufacturing_drawing": drawing.generate_manufacturing_drawing,
+        "review_manufacturing_drawing": review.review_manufacturing_drawing,
+        "overall_dimensions": inspect_module.overall_dimensions,
+        "mass_properties": mass_module.mass_properties,
     }
     globals().update(exports)
     pythoncom = importlib.import_module("pythoncom")
@@ -767,6 +776,60 @@ class SolidWorksMotionValidationInput(BaseInput):
     minimum_motor_count: int = Field(default=1, ge=0, le=1000)
     require_results: bool = Field(default=True)
     response_format: ResponseFormat = Field(default=ResponseFormat.JSON, description="Return format.")
+
+
+class SolidWorksDrawingSpecInput(BaseInput):
+    """Shared manufacturing-drawing frame/plan options."""
+
+    part_path: str = Field(..., min_length=1, description="Absolute path to the .SLDPRT part.")
+    paper_size: str = Field(default="A3", description="Preferred paper size A4-A0; auto-upsized when scale <1:2.")
+    projection: str = Field(default="first_angle", description="first_angle (GB default) or third_angle.")
+    template_path: Optional[str] = Field(default=None, description="Optional .drwdot drawing document template.")
+    sheet_format_path: Optional[str] = Field(default=None, description="Optional .slddrt sheet format (frame + title block).")
+    title_block: Dict[str, Any] = Field(default_factory=dict, description="Title block fields, e.g. 名称/图号/材料/数量/设计.")
+    technical_requirements: list = Field(default_factory=list, description="Extra technical requirement lines.")
+    grade: str = Field(default="m", description="GB/T 1804 general tolerance grade: f/m/c/v.")
+    fit_suggestion: Optional[str] = Field(default="H7", description="Default hole fit suggestion (H7) or None to disable.")
+    width_mm: Optional[float] = Field(default=None, gt=0.0, le=20000.0, description="Override nominal width; measured when omitted.")
+    height_mm: Optional[float] = Field(default=None, gt=0.0, le=20000.0, description="Override nominal height; measured when omitted.")
+    depth_mm: Optional[float] = Field(default=None, gt=0.0, le=20000.0, description="Override nominal depth; measured when omitted.")
+    measure: bool = Field(default=True, description="Measure W/H/D, mass and holes from the 3D model (read-only).")
+    response_format: ResponseFormat = Field(default=ResponseFormat.JSON, description="Return format.")
+
+    @field_validator("part_path")
+    @classmethod
+    def part_path_must_exist(cls, value: str) -> str:
+        if not Path(os.path.expandvars(value)).expanduser().exists():
+            raise ValueError(f"File does not exist: {value}")
+        return value
+
+    @field_validator("grade")
+    @classmethod
+    def grade_must_be_supported(cls, value: str) -> str:
+        if value not in {"f", "m", "c", "v"}:
+            raise ValueError("grade must be one of f/m/c/v (GB/T 1804).")
+        return value
+
+    @field_validator("projection")
+    @classmethod
+    def projection_must_be_supported(cls, value: str) -> str:
+        if value not in {"first_angle", "third_angle"}:
+            raise ValueError("projection must be first_angle or third_angle.")
+        return value
+
+
+class SolidWorksPlanDrawingInput(SolidWorksDrawingSpecInput):
+    """Input for planning a manufacturing drawing (read-only evidence + plan)."""
+
+
+class SolidWorksCreateDrawingInput(SolidWorksDrawingSpecInput):
+    """Input for generating the manufacturing drawing end to end."""
+
+    out_dir: str = Field(..., min_length=1, description="Output directory for SLDDRW/PDF/preview/review artifacts.")
+    sheet_format_candidates: list = Field(
+        default_factory=list,
+        description="Optional candidate .slddrt paths searched when sheet_format_path is not given.",
+    )
 
 
 def _coinitialize() -> None:
@@ -2021,6 +2084,128 @@ def solidworks_validate_motion_study(params: SolidWorksMotionValidationInput = S
             "status": audit["validation"]["status"],
             "motion": audit,
             "document": _model_summary(asm),
+        }
+
+    return _run_locked(op, params.response_format)
+
+
+def _drawing_frame_spec(params: SolidWorksDrawingSpecInput) -> Dict[str, Any]:
+    """Compose the frame spec dict for the planning layer."""
+    return {
+        "paper_size": params.paper_size,
+        "projection": params.projection,
+        "template_path": params.template_path,
+        "sheet_format_path": params.sheet_format_path,
+        "title_block": dict(params.title_block or {}),
+        "technical_requirements": list(params.technical_requirements or []),
+    }
+
+
+def _collect_manufacturing_evidence(params: SolidWorksDrawingSpecInput) -> Dict[str, Any]:
+    """Collect read-only 3D evidence: nominal W/H/D, mass properties and B-Rep holes."""
+    evidence: Dict[str, Any] = {"part_path": params.part_path}
+    nominal = {
+        "width_mm": params.width_mm,
+        "height_mm": params.height_mm,
+        "depth_mm": params.depth_mm,
+    }
+    needs_measurement = params.measure or any(value is None for value in nominal.values())
+    if needs_measurement:
+        sw = connect_solidworks(visible=False)
+        measured = overall_dimensions(sw, params.part_path)
+        evidence["measurement"] = measured
+        for key in nominal:
+            if nominal[key] is None and measured.get(key) is not None:
+                nominal[key] = measured[key]
+        part_model = open_document(sw, params.part_path, silent=True)
+        if part_model is not None:
+            evidence["mass"] = mass_properties(part_model)
+            measurements = collect_geometry_measurements(part_model)
+            evidence["holes"] = [
+                {"diameter_mm": hole.get("diameter_mm")}
+                for hole in measurements.get("holes") or []
+                if hole.get("diameter_mm") is not None
+            ]
+    evidence["nominal"] = nominal
+    return evidence
+
+
+@mcp.tool(
+    name="solidworks_plan_manufacturing_drawing",
+    title="Plan Manufacturing Drawing",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+def solidworks_plan_manufacturing_drawing(params: SolidWorksPlanDrawingInput) -> str:
+    """Collect read-only 3D evidence (W/H/D, mass, holes) and return an auditable manufacturing drawing plan."""
+
+    def op():
+        evidence = _collect_manufacturing_evidence(params)
+        plan = plan_manufacturing_drawing(
+            evidence,
+            _drawing_frame_spec(params),
+            {"grade": params.grade, "fit_suggestion": params.fit_suggestion},
+        )
+        return {
+            "status": plan["status"],
+            "error_code": plan.get("error_code"),
+            "plan": plan,
+        }
+
+    return _run_locked(op, params.response_format)
+
+
+@mcp.tool(
+    name="solidworks_create_manufacturing_drawing",
+    title="Create Manufacturing Drawing",
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+)
+def solidworks_create_manufacturing_drawing(params: SolidWorksCreateDrawingInput) -> str:
+    """Generate a GB manufacturing drawing end to end: plan, execute (frame, views, dimensions, GB/T 1804 tolerances, title block), export PDF and review."""
+
+    def op():
+        evidence = _collect_manufacturing_evidence(params)
+        plan = plan_manufacturing_drawing(
+            evidence,
+            _drawing_frame_spec(params),
+            {"grade": params.grade, "fit_suggestion": params.fit_suggestion},
+        )
+        if plan["status"] == "blocked":
+            return {
+                "status": "blocked",
+                "error_code": plan.get("error_code"),
+                "plan": plan,
+            }
+        sw = connect_solidworks()
+        execution = generate_manufacturing_drawing(
+            sw,
+            plan,
+            params.out_dir,
+            sheet_format_candidates=list(params.sheet_format_candidates or []) or None,
+        )
+        artifacts = execution.get("artifacts") or {}
+        review = None
+        if artifacts.get("pdf"):
+            review = review_manufacturing_drawing(
+                pdf_path=artifacts["pdf"],
+                report_path=str(Path(params.out_dir) / "review_report.json"),
+            )
+        return {
+            "status": execution["status"],
+            "error_code": execution.get("error_code"),
+            "plan": plan,
+            "execution": execution,
+            "review": review,
+            "artifacts": artifacts,
         }
 
     return _run_locked(op, params.response_format)

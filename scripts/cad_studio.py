@@ -165,6 +165,19 @@ def main(argv: list[str] | None = None) -> int:
     surface = sub.add_parser("create-ocp-surface")
     surface.add_argument("--input", type=Path, required=True, help="OCP 高级曲面 1.0 参数 JSON")
     surface.add_argument("--out-dir", type=Path, required=True, help="STEP/BREP/STL 版本化输出目录")
+    create_drawing = sub.add_parser("create-drawing")
+    create_drawing.add_argument("--part", type=Path, required=True, help="SolidWorks 零件 .SLDPRT 路径")
+    create_drawing.add_argument("--out-dir", type=Path, required=True, help="SLDDRW/PDF/审查产物输出目录")
+    create_drawing.add_argument("--plan", type=Path, help="可选预生成计划 JSON(sw_drawing_plan 输出);缺省现场测量并规划")
+    create_drawing.add_argument("--paper", default="A3", help="首选图幅 A4-A0;比例 <1:2 时自动升档")
+    create_drawing.add_argument("--format-path", type=Path, help="可选 GB 图框 .slddrt 路径")
+    create_drawing.add_argument("--template-path", type=Path, help="可选工程图文档模板 .drwdot 路径")
+    create_drawing.add_argument("--grade", choices=("f", "m", "c", "v"), default="m", help="GB/T 1804 未注公差等级")
+    create_drawing.add_argument("--name", help="标题栏 名称 字段")
+    create_drawing.add_argument("--material", help="标题栏 材料 字段")
+    create_drawing.add_argument("--qty", type=int, help="标题栏 数量 字段")
+    create_drawing.add_argument("--designer", help="标题栏 设计 字段")
+    create_drawing.add_argument("--tech", action="append", default=[], help="附加技术要求行,可重复")
     args = parser.parse_args(argv)
 
     if args.command == "doctor":
@@ -300,6 +313,61 @@ def main(argv: list[str] | None = None) -> int:
         result = execute_advanced_surface(args.input, args.out_dir)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 1 if result.get("status") in {"blocked", "failed"} else 0
+    if args.command == "create-drawing":
+        from sw_connect import connect_solidworks, open_document
+        from sw_inspect import overall_dimensions
+        from sw_mass_properties import mass_properties
+        from sw_drawing_plan import plan_manufacturing_drawing
+        from sw_drawing import generate_manufacturing_drawing
+        from sw_review import review_manufacturing_drawing
+
+        part = args.part.expanduser().resolve()
+        if not part.is_file():
+            raise SystemExit(f"零件不存在: {part}")
+        if args.plan:
+            plan = json.loads(args.plan.expanduser().read_text(encoding="utf-8"))
+        else:
+            sw = connect_solidworks()
+            measured = overall_dimensions(sw, str(part))
+            part_model = open_document(sw, str(part), silent=True)
+            evidence = {
+                "part_path": str(part),
+                "nominal": {key: measured.get(key) for key in ("width_mm", "height_mm", "depth_mm")},
+                "measurement": measured,
+            }
+            if part_model is not None:
+                evidence["mass"] = mass_properties(part_model)
+            title_block = {
+                key: value
+                for key, value in (("名称", args.name), ("材料", args.material),
+                                   ("数量", args.qty), ("设计", args.designer))
+                if value is not None
+            }
+            frame_spec = {
+                "paper_size": args.paper.upper(),
+                "projection": "first_angle",
+                "template_path": str(args.template_path) if args.template_path else None,
+                "sheet_format_path": str(args.format_path) if args.format_path else None,
+                "title_block": title_block,
+                "technical_requirements": args.tech,
+            }
+            plan = plan_manufacturing_drawing(evidence, frame_spec, {"grade": args.grade})
+        if plan.get("status") == "blocked":
+            print(json.dumps({"status": "blocked", "plan": plan}, ensure_ascii=False, indent=2, default=str))
+            return 1
+        sw = connect_solidworks()
+        execution = generate_manufacturing_drawing(sw, plan, args.out_dir)
+        artifacts = execution.get("artifacts") or {}
+        review = None
+        if artifacts.get("pdf"):
+            review = review_manufacturing_drawing(
+                pdf_path=artifacts["pdf"],
+                report_path=str(Path(args.out_dir) / "review_report.json"),
+            )
+        result = {"status": execution["status"], "plan_status": plan.get("status"),
+                  "execution": execution, "review": review}
+        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        return 1 if execution.get("status") in {"blocked", "failed"} else 0
     return 2
 
 
