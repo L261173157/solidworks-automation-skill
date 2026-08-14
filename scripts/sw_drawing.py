@@ -2027,18 +2027,21 @@ def generate_manufacturing_drawing(sw, plan, out_dir, *, sheet_format_candidates
         get_com_member(drawing_model, "EditRebuild3")
 
         # 6) 先存盘提交视图几何(未存盘视图只暴露部分剪影边),再强制激活
-        #    (SelectByID2 作用于活动文档)。
-        saved = get_com_member(drawing_model, "SaveAs3", str(slddrw_path), 0, 0)
+        #    (SelectByID2 作用于活动文档)。SaveAs3 返回值在动态派发下同样
+        #    不可靠,以落盘证据为准。
+        get_com_member(drawing_model, "SaveAs3", str(slddrw_path), 0, 0)
         errors_variant = VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
         title = str(_safe_member(drawing_model, "GetTitle", default="") or "")
         try:
             get_com_member(sw, "ActivateDoc3", title, False, 0, errors_variant)
         except Exception:
             pass
+        saved_on_disk = slddrw_path.is_file() and slddrw_path.stat().st_size > 0
         report["stages"]["commit"] = {
-            "status": "pass" if saved else "review_required",
+            "status": "pass" if saved_on_disk else "review_required",
             "slddrw": str(slddrw_path),
-            "saved": bool(saved),
+            "saved": bool(saved_on_disk),
+            "evidence": "file_on_disk" if saved_on_disk else "file_missing",
         }
 
         # 7) 尺寸标注:scan=坐标扫描 W/H/D+计划公差;model_only=仅模型尺寸。

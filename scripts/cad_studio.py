@@ -177,6 +177,9 @@ def main(argv: list[str] | None = None) -> int:
     create_drawing.add_argument("--material", help="标题栏 材料 字段")
     create_drawing.add_argument("--qty", type=int, help="标题栏 数量 字段")
     create_drawing.add_argument("--designer", help="标题栏 设计 字段")
+    create_drawing.add_argument("--width", type=float, help="名义宽 W(mm);缺省用测量包络(含约+6mm 余量,跨公差档会错档,精确公差建议显式给定)")
+    create_drawing.add_argument("--height", type=float, help="名义高 H(mm);同 --width")
+    create_drawing.add_argument("--depth", type=float, help="名义深 D(mm);同 --width")
     create_drawing.add_argument("--tech", action="append", default=[], help="附加技术要求行,可重复")
     args = parser.parse_args(argv)
 
@@ -330,9 +333,16 @@ def main(argv: list[str] | None = None) -> int:
             sw, _model = connect_solidworks()
             measured = overall_dimensions(sw, str(part))
             part_model = open_document(sw, str(part), silent=True)
+            nominal = {key: measured.get(key) for key in ("width_mm", "height_mm", "depth_mm")}
+            if args.width is not None:
+                nominal["width_mm"] = args.width
+            if args.height is not None:
+                nominal["height_mm"] = args.height
+            if args.depth is not None:
+                nominal["depth_mm"] = args.depth
             evidence = {
                 "part_path": str(part),
-                "nominal": {key: measured.get(key) for key in ("width_mm", "height_mm", "depth_mm")},
+                "nominal": nominal,
                 "measurement": measured,
             }
             if part_model is not None:
