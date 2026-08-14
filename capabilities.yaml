@@ -340,7 +340,7 @@
         "三段管线：sw_drawing_plan 纯计划（图幅/比例/第一角布局/GB/T 1804 f/m/c/v 公差/标题栏/技术要求/孔配合建议）→ sw_drawing.generate_manufacturing_drawing 执行 → sw_review.review_manufacturing_drawing 审查；计划与 schema 契约 apps/desktop/cad_workbench/schemas/manufacturing_drawing_plan.schema.json 对齐",
         "视图比例 <1:2 时坐标扫描标注不可用（SW 不暴露可点选边），计划层自动升图幅至放得下为止；升到 A0 仍不足则降级仅模型尺寸并 review_required",
         "标题栏优先探测 $PRP 属性联动自动填充，GB 官方模板单元格为空时退回左上角文字注释克位（SW2024 实证兜底）；图框内容合规始终需人工目视复核",
-        "技术要求为默认模板行+用户增补；孔配合建议默认 H7（GB/T 1800.1 常用段 3~250mm，不判断孔用途，一律 review_required 须人工确认）；GD&T 不在本能力内；产物四件套 slddrw/pdf/preview_png/review_report 对齐 golden-workflows engineering_drawing 契约；尚未完成真机回归"
+        "技术要求为默认模板行+用户增补;孔配合建议默认 H7(GB/T 1800.1 常用段 3~250mm,不判断孔用途,一律 review_required 须人工确认);GD&T 不在本能力内;产物四件套 slddrw/pdf/preview_png/review_report 对齐 golden-workflows engineering_drawing 契约;SW2024 已真机回归(支架件:GB 图框+第一角三视图+W/H/D 公差渲染 60±0.3/10.5±0.2/40±0.3+PDF 四产物);已知局限:①SetupSheet5 图框与注释共存上限为 1 条单行(信息+技术要求已合并为唯一单行注释),②CreateText2 注释仅在 SLDDRW 模型层可读、PDF 导出不渲染(与 gen_drawing.py 实验基线一致,标题栏字段 PDF 端渲染待 $PRP 自定义模板路线)"
       ],
       "allowed_modes": ["interactive", "reviewed"]
     }

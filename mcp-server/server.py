@@ -2111,7 +2111,7 @@ def _collect_manufacturing_evidence(params: SolidWorksDrawingSpecInput) -> Dict[
     }
     needs_measurement = params.measure or any(value is None for value in nominal.values())
     if needs_measurement:
-        sw = connect_solidworks(visible=False)
+        sw, _model = connect_solidworks(visible=False)
         measured = overall_dimensions(sw, params.part_path)
         evidence["measurement"] = measured
         for key in nominal:
@@ -2185,7 +2185,7 @@ def solidworks_create_manufacturing_drawing(params: SolidWorksCreateDrawingInput
                 "error_code": plan.get("error_code"),
                 "plan": plan,
             }
-        sw = connect_solidworks()
+        sw, _model = connect_solidworks()
         execution = generate_manufacturing_drawing(
             sw,
             plan,

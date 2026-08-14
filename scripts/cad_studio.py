@@ -327,7 +327,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.plan:
             plan = json.loads(args.plan.expanduser().read_text(encoding="utf-8"))
         else:
-            sw = connect_solidworks()
+            sw, _model = connect_solidworks()
             measured = overall_dimensions(sw, str(part))
             part_model = open_document(sw, str(part), silent=True)
             evidence = {
@@ -355,7 +355,7 @@ def main(argv: list[str] | None = None) -> int:
         if plan.get("status") == "blocked":
             print(json.dumps({"status": "blocked", "plan": plan}, ensure_ascii=False, indent=2, default=str))
             return 1
-        sw = connect_solidworks()
+        sw, _model = connect_solidworks()
         execution = generate_manufacturing_drawing(sw, plan, args.out_dir)
         artifacts = execution.get("artifacts") or {}
         review = None

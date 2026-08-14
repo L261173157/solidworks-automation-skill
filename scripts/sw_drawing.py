@@ -1083,6 +1083,10 @@ def export_sheet_to_pdf(model, output_path, sheet_names=None, sw_app=None):
         sheet_names: 图纸名称列表，None=所有图纸
         sw_app: 可选的 SldWorks.Application 对象；传入会话对象可避免 SW2024
             动态 IModelDoc2 未暴露 GetSldWorksObject 的兼容性问题。
+
+    SW2024 动态派发下 Extension.SaveAs 常返回 False 且 errors=1,但文件实际
+    已写出;SetSheets 也可能返回 False(默认导出全部图纸)。因此成功判定以
+    落盘证据为准:文件存在、非空且以 %PDF 开头。
     """
     sw = sw_app
     if sw is None:
@@ -1093,10 +1097,12 @@ def export_sheet_to_pdf(model, output_path, sheet_names=None, sw_app=None):
             except Exception:
                 continue
     if sw is None:
+        print("PDF 导出失败: 未找到 SolidWorks 会话")
         return False
     try:
         pdf_data = get_com_member(sw, "GetExportFileData", 1)  # 1 = swExportPDFData
     except Exception:
+        print("PDF 导出失败: GetExportFileData 不可用")
         return False
 
     if sheet_names is None:
@@ -1104,19 +1110,28 @@ def export_sheet_to_pdf(model, output_path, sheet_names=None, sw_app=None):
         sheet_names = get_com_member(drawing, "GetSheetNames")
 
     try:
-        pdf_data.SetSheets(0, sheet_names)  # 0 = swExportData_ExportSpecifiedSheets
+        pdf_data.SetSheets(0, sheet_names)  # 0 = swExportData_ExportSpecifiedSheets(失败则默认全部)
     except Exception:
-        return False
+        pass
 
     errors = VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
     warnings = VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
-    success = model.Extension.SaveAs(output_path, 0, 1, pdf_data, errors, warnings)
+    save_return = model.Extension.SaveAs(output_path, 0, 1, pdf_data, errors, warnings)
 
-    if success:
+    # 落盘证据优先于 COM 返回值(SW2024 动态派发返回值不可靠)
+    pdf_valid = False
+    try:
+        path = Path(str(output_path))
+        if path.is_file() and path.stat().st_size > 0:
+            with open(path, "rb") as handle:
+                pdf_valid = handle.read(5).startswith(b"%PDF")
+    except OSError:
+        pdf_valid = False
+    if pdf_valid:
         print(f"PDF 导出成功: {output_path}")
-    else:
-        print(f"PDF 导出失败, 错误码: {errors.value}")
-    return success
+        return True
+    print(f"PDF 导出失败: SaveAs={save_return} 错误码: {errors.value}")
+    return False
 
 
 # =============================================================================
@@ -1598,17 +1613,24 @@ def scan_view_dimensions(drawing_model, front_view, top_view, *,
 #   ② 套图框用 SetupSheet5 且 TemplateIn 必须 12(Custom),传 0..11 会忽略
 #      .slddrt 路径;
 #   ③ 新建视图先 SaveAs3 存盘再做坐标扫描(存盘提交几何后全部边线才可选);
-#   ④ SelectByID2 作用于活动文档,扫描前强制 ActivateDoc3。
+#   ④ SelectByID2 作用于活动文档,扫描前强制 ActivateDoc3;
+#   ⑤ 图框与注释共存上限为"恰好 1 条单行注释"——第 2 条注释(含 InsertNote)
+#      或多行文本(\r\n)会使图框内容渲染丢失(2026-08 真机矩阵复现;尺寸标注
+#      不受影响)。信息+技术要求必须合并为唯一一条单行注释。
 # =============================================================================
 
 
-def set_drawing_document_preferences(drawing_model, *, projection="first_angle", decimals=0):
-    """@brief 设置工程图文档级偏好:单位制 MMGS(毫米)、投影角度、线性小数位。
+def set_drawing_document_preferences(drawing_model, *, projection="first_angle", decimals=None):
+    """@brief 设置工程图文档级偏好:单位制 MMGS(毫米)、投影角度、可选线性小数位。
 
     必须在创建任何视图/尺寸之前调用(drw_unit_fix.py 实证:尺寸显示在创建时
     锁定,事后设置不回溯)。应用级 SetUserPreferenceIntegerValue 对已有文档
     无效,必须走 model 级通道。第一角=(79,1) 已实证;第三角不写该键(多数
     区域安装默认即第三角)。
+
+    decimals 默认 None=不设置:SW2024 实证 (49,0) 会把公差值显示四舍五入到
+    整数(±0.3 渲染成 ±0),模板默认小数位可同时让名义尺寸保持整数观感、
+    公差保留小数,与 gen_drawing.py 定稿行为一致。
     """
     result = {
         "status": "failed",
@@ -1616,7 +1638,7 @@ def set_drawing_document_preferences(drawing_model, *, projection="first_angle",
         "units": {"key": 263, "value": 5, "meaning": "swUnitSystem_MMGS"},
         "projection": {"key": 79, "value": 1 if projection == "first_angle" else None,
                        "meaning": "swDrawingViewProjection"},
-        "decimals": {"key": 49, "value": int(decimals), "meaning": "线性尺寸小数位"},
+        "decimals": {"key": 49, "value": decimals, "meaning": "线性尺寸小数位(None=不设置)"},
         "applied": [],
         "manual_review_required": False,
         "retryable": True,
@@ -1628,8 +1650,9 @@ def set_drawing_document_preferences(drawing_model, *, projection="first_angle",
         if projection == "first_angle":
             if get_com_member(drawing_model, "SetUserPreferenceIntegerValue", 79, 1):
                 result["applied"].append("first_angle")
-        if get_com_member(drawing_model, "SetUserPreferenceIntegerValue", 49, int(decimals)):
-            result["applied"].append(f"decimals_{int(decimals)}")
+        if decimals is not None:
+            if get_com_member(drawing_model, "SetUserPreferenceIntegerValue", 49, int(decimals)):
+                result["applied"].append(f"decimals_{int(decimals)}")
         result["status"] = "pass" if "units_mmgs" in result["applied"] else "review_required"
         if result["status"] == "review_required":
             result["error_code"] = "DRAWING_PREF_UNITS_NOT_APPLIED"
@@ -1784,32 +1807,37 @@ def probe_title_block_links(drawing_model):
     }
 
 
-def fill_title_block(drawing_model, fields, *, note_x=0.045, note_y_from_top=0.035):
-    """@brief 填充标题栏字段:优先属性联动,空白标题栏退回文字注释克位。
+def fill_title_block(drawing_model, fields, *, tech_lines=None,
+                     note_x=0.045, note_y_from_top=0.035):
+    """@brief 填充标题栏字段:优先属性联动,空白标题栏退回唯一一条单行注释。
 
     属性联动路线:文档级 CustomPropertyManager 写入,图框 "$PRP" 注释自动刷新
-    (需先 probe_title_block_links 确认模板支持);注释克位路线:CreateText2 在
-    图纸左上角写一行"零件/材料/数量/比例"信息(SW2024 电机项目实证的兜底方案,
-    GB 官方模板标题栏单元格为空)。
+    (需先 probe_title_block_links 确认模板支持)。
+
+    注释克位路线(SW2024 硬约束,见下方"图框与注释共存约束"):信息字段与技术
+    要求合并为**唯一一条单行注释**,置于图纸左上角。GB 官方模板标题栏单元格为
+    空,这是实证兜底方案。
     """
     fields = {str(key): value for key, value in dict(fields or {}).items() if value is not None}
+    tech_lines = [str(line) for line in (tech_lines or []) if str(line).strip()]
     result = {
         "status": "review_required",
         "stage": "title_block",
         "method_used": None,
         "fields_written": [],
+        "tech_lines": tech_lines,
         "note_evidence": None,
         "probe": None,
         "manual_review_required": True,
         "retryable": False,
         "error_code": None,
     }
-    if not fields:
+    if not fields and not tech_lines:
         result["error_code"] = "DRAWING_TITLE_BLOCK_NO_FIELDS"
         return result
     probe = probe_title_block_links(drawing_model)
     result["probe"] = probe
-    if probe["linked"]:
+    if fields and probe["linked"]:
         extension = _safe_member(drawing_model, "Extension", default=None)
         manager = _safe_member(extension, "CustomPropertyManager", "", default=None) if extension is not None else None
         if manager is not None:
@@ -1823,24 +1851,39 @@ def fill_title_block(drawing_model, fields, *, note_x=0.045, note_y_from_top=0.0
                         written.append(name)
                 result["method_used"] = "custom_properties"
                 result["fields_written"] = written
-                result["status"] = "pass" if written else "review_required"
-                if not written:
-                    result["error_code"] = "DRAWING_TITLE_BLOCK_PROPERTY_WRITE_FAILED"
-                return result
+                if written and not tech_lines:
+                    result["status"] = "pass"
+                    return result
+                # 属性已写但仍有技术要求行 → 技术要求走唯一一条单行注释。
+                if written:
+                    note_text = "技术要求:" + ";".join(tech_lines)
+                    note = add_text_note(drawing_model, note_text, note_x, _sheet_height_m(drawing_model) - note_y_from_top)
+                    result["note_evidence"] = note
+                    result["status"] = note["status"]
+                    return result
+                result["error_code"] = "DRAWING_TITLE_BLOCK_PROPERTY_WRITE_FAILED"
+                # 属性写入失败继续走注释兜底,不直接返回。
             except Exception as exc:
                 result["error_code"] = "DRAWING_TITLE_BLOCK_PROPERTY_WRITE_FAILED"
                 result["error"] = str(exc)
                 # 属性写入失败继续走注释兜底,不直接返回。
-    # 注释克位兜底:GB 标题栏材料/名称单元格为空,用左上角信息行补足(实证方案)。
-    sheet = _safe_member(drawing_model, "GetCurrentSheet")
-    sheet_height = _finite_positive(_safe_member(sheet, "Height"), 0.297)[0]
-    note_text = "   ".join(f"{key}:{value}" for key, value in fields.items())
-    note = add_text_note(drawing_model, note_text, note_x, sheet_height - note_y_from_top)
+    # 注释克位兜底:信息字段+技术要求合并为唯一一条单行注释(SW2024 硬约束)。
+    parts = [f"{key}:{value}" for key, value in fields.items()]
+    if tech_lines:
+        parts.append("技术要求:" + ";".join(tech_lines))
+    note_text = "   ".join(parts)
+    note = add_text_note(drawing_model, note_text, note_x, _sheet_height_m(drawing_model) - note_y_from_top)
     result["method_used"] = "text_note_fallback"
     result["fields_written"] = list(fields)
     result["note_evidence"] = note
     result["status"] = note["status"]
     return result
+
+
+def _sheet_height_m(drawing_model):
+    """@brief 读取当前图纸高度(米),失败回退 A3 高度。"""
+    sheet = _safe_member(drawing_model, "GetCurrentSheet")
+    return _finite_positive(_safe_member(sheet, "Height"), 0.297)[0]
 
 
 def _plan_tolerance_resolver(plan):
@@ -2027,22 +2070,22 @@ def generate_manufacturing_drawing(sw, plan, out_dir, *, sheet_format_candidates
                 "error_code": None if inserted_count else "DRAWING_MODEL_DIMENSIONS_EMPTY",
             }
 
-        # 8) 标题栏填充(属性联动优先,注释克位兜底)+ 技术要求注释。
+        # 8) 标题栏填充 + 技术要求:合并处理(SW2024 硬约束,见下方约束说明)。
+        #    SetupSheet5 套用的图框与注释共存上限为"恰好 1 条单行注释"——第 2 条
+        #    注释(含 InsertNote)或多行文本(\r\n)都会使图框内容渲染丢失
+        #    (2026-08 真机复现:1 条单行幸存/2 条必死/多行必死;尺寸标注不受影响)。
+        #    因此信息字段与技术要求由 fill_title_block 合并为唯一一条单行注释。
+        tech_lines = (((plan or {}).get("technical_requirements") or {}).get("lines")) or []
         report["stages"]["title_block"] = fill_title_block(
             drawing_model,
             ((plan or {}).get("title_block") or {}).get("fields") or {},
+            tech_lines=tech_lines,
         )
-        sheet = _safe_member(drawing_model, "GetCurrentSheet")
-        sheet_height = _finite_positive(_safe_member(sheet, "Height"), 0.297)[0]
-        tech_lines = (((plan or {}).get("technical_requirements") or {}).get("lines")) or []
-        tech_reports = [
-            add_text_note(drawing_model, line, 0.045, sheet_height * 0.35 - index * 0.009)
-            for index, line in enumerate(tech_lines)
-        ]
         report["stages"]["technical_requirements"] = {
-            "status": _worst_status(item["status"] for item in tech_reports) if tech_reports else "review_required",
+            "status": report["stages"]["title_block"]["status"],
             "lines": tech_lines,
-            "notes": tech_reports,
+            "merged_into_single_note": True,
+            "reason": "SW2024 图框与注释共存上限为 1 条单行,技术要求已并入信息注释",
         }
 
         # 9) 重建、存盘、导出 PDF。

@@ -325,8 +325,23 @@ report = review_manufacturing_drawing(pdf_path=execution["artifacts"]["pdf"],
 * **标题栏双路线**:`fill_title_block` 先探测图框注释是否含 `$PRP` 属性联动
   (`probe_title_block_links`);联动则写文档自定义属性自动刷新;GB 官方模板
   单元格为空时退回左上角 `CreateText2` 信息行(实证兜底)。
+* **图框与注释共存上限(SW2024 真机硬约束)**:SetupSheet5 套用的图框与注释
+  共存的上限是**恰好 1 条单行注释**——第 2 条注释(含 InsertNote)或多行文本
+  (\r\n)都会使图框内容在渲染/导出中丢失(尺寸标注不受影响;2026-08 矩阵
+  复现:1 条单行幸存、2 条必死、多行必死、注释先后顺序无关)。因此管线把
+  信息字段与技术要求**合并为唯一一条单行注释**,自定义模板若走 $PRP 属性
+  联动则不受此限。
 * **图框**:`SetupSheet5` 的 TemplateIn 必须 `12`(swDwgTemplateCustom),
   传 0..11 会忽略 `.slddrt` 路径;套用后图纸尺寸由图框格式决定。
+* **PDF 导出成功判定**:SW2024 动态派发下 `Extension.SaveAs` 常返回 False
+  且 errors=1,但文件实际已写出;`export_sheet_to_pdf` 以落盘证据(存在、
+  非空、%PDF 头)判定成功,不信任 COM 返回值。
+* **注释 PDF 渲染局限(SW2024 已知)**:`CreateText2`/`InsertNote` 注释在 COM
+  层创建成功且 GetText 可回读,但 **PDF 导出不渲染**(空白图亦然,与
+  gen_drawing.py 实验基线一致)。信息与技术要求注释仅在 SLDDRW 模型层和
+  review_report.json 中可读;PDF 端标题栏字段渲染依赖 $PRP 自定义模板路线。
+* **小数位偏好陷阱**:`SetUserPreferenceIntegerValue(49, 0)`(0 位小数)会把
+  公差值显示四舍五入成整数(±0.3 渲染成 ±0);管线不设置 49,交给模板默认。
 * **名义尺寸来源**:`sw_inspect.overall_dimensions`(临时 1:1 图 GetOutline)
   或人工给定;公差分档按外部已知名义查表,不读尺寸回读值(单位不一致会错档)。
 * 计划契约 schema:`apps/desktop/cad_workbench/schemas/manufacturing_drawing_plan.schema.json`。
