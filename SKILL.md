@@ -106,6 +106,7 @@ session.export(model, r"C:\temp\cylinder.step")
 | 装配体操作、齿轮/铰链/可拖动运动配合 | `scripts/sw_assembly.py` | `references/assembly.md` |
 | Motion Study 运动算例、旋转马达与结果审计 | `scripts/sw_motion.py` | `references/motion-study.md`、`references/complex-mechanical-routing.md` |
 | 工程图出图 | `scripts/sw_drawing.py` | `references/drawing.md` |
+| 制造零件图一键生成（图框/标题栏+三视图+公差+技术要求+PDF+审查） | `scripts/sw_drawing_plan.py`、`scripts/sw_drawing.py`、`scripts/sw_review.py` | `references/drawing.md`、`references/tolerances.md`、`examples/gen_manufacturing_drawing.py` |
 | 尺寸公差标注（对称 ±/上下限 + GB/T 1804-m） | `scripts/sw_drawing.py` | `references/tolerances.md` |
 | 坐标扫描式工程图尺寸标注（无模型尺寸件） | `scripts/sw_drawing.py` | `references/drawing.md`、`references/tolerances.md` |
 | 文件导出 | `scripts/sw_export.py` | `references/export.md` |

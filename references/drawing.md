@@ -288,3 +288,45 @@ errors = VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
 warnings = VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
 model.Extension.SaveAs("output.pdf", 0, 1, pdf_data, errors, warnings)
 ```
+
+## 制造零件图一键生成管线（manufacturing_drawing_generation，pilot）
+
+完整示例见 `examples/gen_manufacturing_drawing.py`。三段式:
+
+```python
+from sw_drawing_plan import plan_manufacturing_drawing
+from sw_drawing import generate_manufacturing_drawing
+from sw_review import review_manufacturing_drawing
+
+# ① 计划(纯 Python 无 COM):图幅/比例自动求解、第一角布局、GB/T 1804-m
+#    公差分档、标题栏字段、技术要求模板。比例 <1:2 自动升图幅。
+plan = plan_manufacturing_drawing(
+    {"part_path": part, "nominal": {"width_mm": 60, "height_mm": 10.5, "depth_mm": 40},
+     "mass": mass_properties_report, "holes": hole_groups},
+    {"paper_size": "A3", "projection": "first_angle",
+     "sheet_format_path": r"...a3 - gb.slddrt",      # 可选,GB 图框
+     "title_block": {"名称": "支架", "材料": "Q235-A", "数量": 2},
+     "technical_requirements": ["调质 28~32HRC。"]},
+)
+
+# ② 执行(COM 编排,顺序硬约束):开零件→新建图→套图框(SetupSheet5
+#    TemplateIn=12)→文档级偏好(先于视图!)→三视图+ScaleDecimal 强制比例
+#    →先存盘再激活→扫描标注+计划公差→标题栏→技术要求→重建存盘→PDF。
+execution = generate_manufacturing_drawing(sw, plan, out_dir)
+
+# ③ 审查:结构(inspect_drawing_structure)+布局碰撞(review_drawing_layout)
+#    +PDF 矢量文字重叠(inspect_pdf_text_layout)+PNG 目视证据,产出
+#    review_report.json(golden-workflows engineering_drawing 四产物契约)。
+report = review_manufacturing_drawing(pdf_path=execution["artifacts"]["pdf"],
+                                      report_path=str(out_dir / "review_report.json"))
+```
+
+要点:
+* **标题栏双路线**:`fill_title_block` 先探测图框注释是否含 `$PRP` 属性联动
+  (`probe_title_block_links`);联动则写文档自定义属性自动刷新;GB 官方模板
+  单元格为空时退回左上角 `CreateText2` 信息行(实证兜底)。
+* **图框**:`SetupSheet5` 的 TemplateIn 必须 `12`(swDwgTemplateCustom),
+  传 0..11 会忽略 `.slddrt` 路径;套用后图纸尺寸由图框格式决定。
+* **名义尺寸来源**:`sw_inspect.overall_dimensions`(临时 1:1 图 GetOutline)
+  或人工给定;公差分档按外部已知名义查表,不读尺寸回读值(单位不一致会错档)。
+* 计划契约 schema:`apps/desktop/cad_workbench/schemas/manufacturing_drawing_plan.schema.json`。

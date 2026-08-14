@@ -8,10 +8,10 @@ from pathlib import Path
 
 try:
     from .sw_preflight import import_com_dependencies
-    from .sw_connect import create_empty_dispatch_variant, get_com_member
+    from .sw_connect import create_empty_dispatch_variant, get_com_member, new_document, open_document
 except ImportError:
     from sw_preflight import import_com_dependencies
-    from sw_connect import create_empty_dispatch_variant, get_com_member
+    from sw_connect import create_empty_dispatch_variant, get_com_member, new_document, open_document
 
 pythoncom, _win32com, VARIANT = import_com_dependencies()
 
@@ -1468,24 +1468,40 @@ def add_dimension_between(drawing_model, point_a, point_b, dim_x, dim_y, *, retr
     return None
 
 
-def _scan_dim_entry(axis, display_dimension, nominal_mm, apply_tolerance):
-    """@brief 单个扫描尺寸的结果条目（内部用）。"""
+def _scan_dim_entry(axis, display_dimension, nominal_mm, apply_tolerance, tolerance_resolver=None):
+    """@brief 单个扫描尺寸的结果条目(内部用)。
+
+    tolerance_resolver(dim_id, nominal_mm)->dict|None:计划层公差解析器;返回
+    {plus_mm, minus_mm, tol_type} 时按显式公差写入,返回 None 走默认 GB/T 1804-m。
+    """
     entry = {
         "axis": axis,
         "display_dimension_set": bool(display_dimension),
         "nominal_mm": float(nominal_mm),
         "tolerance_report": None,
     }
-    if display_dimension and apply_tolerance:
-        entry["tolerance_report"] = apply_gb1804m(display_dimension, nominal_mm)
-    elif display_dimension:
+    if display_dimension and not apply_tolerance:
         entry["tolerance_report"] = {"status": "skipped", "reason": "apply_tolerance=False"}
+        return entry
+    if display_dimension and tolerance_resolver is not None:
+        resolved = tolerance_resolver(axis, nominal_mm)
+        if resolved is not None:
+            entry["tolerance_report"] = set_dimension_tolerance(
+                display_dimension,
+                nominal_mm,
+                tol_type=resolved.get("tol_type", SW_TOL_SYMMETRIC),
+                plus_mm=resolved.get("plus_mm"),
+                minus_mm=resolved.get("minus_mm"),
+            )
+            return entry
+    if display_dimension:
+        entry["tolerance_report"] = apply_gb1804m(display_dimension, nominal_mm)
     return entry
 
 
 def scan_view_dimensions(drawing_model, front_view, top_view, *,
                          nominal_width_mm, nominal_height_mm, nominal_depth_mm,
-                         gap=0.030, apply_tolerance=True):
+                         gap=0.030, apply_tolerance=True, tolerance_resolver=None):
     """@brief 坐标扫描式标注前视图 W/H + 俯视图 D，可选套 GB/T 1804-m 对称公差。
 
     端到端：取两视图轮廓 → find_edge 定位 W/H/D 的左/右、上/下边 → add_dimension_between
@@ -1557,9 +1573,9 @@ def scan_view_dimensions(drawing_model, front_view, top_view, *,
             if (bd and td) else None
 
         report["dimensions"] = [
-            _scan_dim_entry("W", dd_w, nominal_width_mm, apply_tolerance),
-            _scan_dim_entry("H", dd_h, nominal_height_mm, apply_tolerance),
-            _scan_dim_entry("D", dd_d, nominal_depth_mm, apply_tolerance),
+            _scan_dim_entry("W", dd_w, nominal_width_mm, apply_tolerance, tolerance_resolver),
+            _scan_dim_entry("H", dd_h, nominal_height_mm, apply_tolerance, tolerance_resolver),
+            _scan_dim_entry("D", dd_d, nominal_depth_mm, apply_tolerance, tolerance_resolver),
         ]
 
         all_set = all(r["display_dimension_set"] for r in report["dimensions"])
@@ -1571,3 +1587,493 @@ def scan_view_dimensions(drawing_model, front_view, top_view, *,
         report["retryable"] = True
         report["error"] = str(exc)
     return report
+
+
+# =============================================================================
+# 制造零件图执行层(manufacturing_drawing_generation)
+# 来源:SW2024 电机项目 gen_drawing.py 定稿流程 + sw_drawing_plan 计划契约。
+# 编排顺序的硬约束(真机实证,违反会静默失败):
+#   ① 文档级偏好(MMGS/第一角/小数位)必须在建任何视图/尺寸之前——尺寸显示
+#      单位在创建时锁定,事后改偏好不刷新旧尺寸;
+#   ② 套图框用 SetupSheet5 且 TemplateIn 必须 12(Custom),传 0..11 会忽略
+#      .slddrt 路径;
+#   ③ 新建视图先 SaveAs3 存盘再做坐标扫描(存盘提交几何后全部边线才可选);
+#   ④ SelectByID2 作用于活动文档,扫描前强制 ActivateDoc3。
+# =============================================================================
+
+
+def set_drawing_document_preferences(drawing_model, *, projection="first_angle", decimals=0):
+    """@brief 设置工程图文档级偏好:单位制 MMGS(毫米)、投影角度、线性小数位。
+
+    必须在创建任何视图/尺寸之前调用(drw_unit_fix.py 实证:尺寸显示在创建时
+    锁定,事后设置不回溯)。应用级 SetUserPreferenceIntegerValue 对已有文档
+    无效,必须走 model 级通道。第一角=(79,1) 已实证;第三角不写该键(多数
+    区域安装默认即第三角)。
+    """
+    result = {
+        "status": "failed",
+        "stage": "preferences",
+        "units": {"key": 263, "value": 5, "meaning": "swUnitSystem_MMGS"},
+        "projection": {"key": 79, "value": 1 if projection == "first_angle" else None,
+                       "meaning": "swDrawingViewProjection"},
+        "decimals": {"key": 49, "value": int(decimals), "meaning": "线性尺寸小数位"},
+        "applied": [],
+        "manual_review_required": False,
+        "retryable": True,
+        "error_code": None,
+    }
+    try:
+        if get_com_member(drawing_model, "SetUserPreferenceIntegerValue", 263, 5):
+            result["applied"].append("units_mmgs")
+        if projection == "first_angle":
+            if get_com_member(drawing_model, "SetUserPreferenceIntegerValue", 79, 1):
+                result["applied"].append("first_angle")
+        if get_com_member(drawing_model, "SetUserPreferenceIntegerValue", 49, int(decimals)):
+            result["applied"].append(f"decimals_{int(decimals)}")
+        result["status"] = "pass" if "units_mmgs" in result["applied"] else "review_required"
+        if result["status"] == "review_required":
+            result["error_code"] = "DRAWING_PREF_UNITS_NOT_APPLIED"
+    except Exception as exc:
+        result["error_code"] = "DRAWING_PREF_SET_FAILED"
+        result["error"] = str(exc)
+    return result
+
+
+def setup_sheet_format(drawing_model, paper_size, format_path):
+    """@brief 为当前图纸套用自定义图框(.slddrt)。
+
+    SetupSheet5 的 TemplateIn 必须 12(swDwgTemplateCustom),否则 format_path 被
+    忽略(SW2024 真机实证);套用后图纸尺寸由图框格式自身决定。返回证据字典。
+    """
+    paper_size = str(paper_size).upper()
+    spec = PAPER_SIZES.get(paper_size)
+    if spec is None:
+        return {
+            "status": "blocked",
+            "stage": "sheet_format",
+            "configured": False,
+            "retryable": False,
+            "error_code": "DRAWING_FORMAT_UNKNOWN_PAPER",
+        }
+    path = Path(format_path)
+    if not path.is_file():
+        return {
+            "status": "blocked",
+            "stage": "sheet_format",
+            "configured": False,
+            "retryable": True,
+            "paper_size": paper_size,
+            "format_path": str(path),
+            "error_code": "DRAWING_FORMAT_FILE_MISSING",
+        }
+    sheet = _safe_member(drawing_model, "GetCurrentSheet")
+    sheet_name = str(_safe_member(sheet, "GetName", default="") or "")
+    result = {
+        "status": "failed",
+        "stage": "sheet_format",
+        "paper_size": paper_size,
+        "paper_code": spec["code"],
+        "format_path": str(path),
+        "sheet_name": sheet_name,
+        "configured": False,
+        "manual_review_required": True,
+        "retryable": True,
+        "error_code": None,
+    }
+    try:
+        configured = bool(get_com_member(
+            drawing_model,
+            "SetupSheet5",
+            sheet_name,
+            spec["code"],
+            12,  # swDwgTemplateCustom:必须传 12 才认 .slddrt 路径
+            1.0,
+            1.0,
+            False,
+            str(path),
+            0.0,
+            0.0,
+            "",
+            False,
+        ))
+        result["configured"] = configured
+        result["status"] = "pass" if configured else "failed"
+        if not configured:
+            result["error_code"] = "DRAWING_FORMAT_SETUP_FAILED"
+    except Exception as exc:
+        result["error_code"] = "DRAWING_FORMAT_SETUP_FAILED"
+        result["error"] = str(exc)
+    return result
+
+
+def add_text_note(drawing_model, text, x, y, height=0.005):
+    """@brief 用 CreateText2 在指定位置放置单行文字注释并回读验证。
+
+    替代 x/y 参数失效的 add_note(InsertNote 不接收位置)。返回证据字典。
+    """
+    result = {
+        "status": "failed",
+        "stage": "note",
+        "text": str(text),
+        "position_m": [float(x), float(y)],
+        "created": False,
+        "readback": None,
+        "retryable": True,
+        "error_code": None,
+    }
+    try:
+        note = get_com_member(drawing_model, "CreateText2", str(text), float(x), float(y), 0.0, float(height), 0.0)
+        result["created"] = note is not None
+        if note is not None:
+            result["readback"] = {
+                "text": str(_safe_member(note, "GetText", default="") or ""),
+                "x": _safe_member(note, "GetX", default=None),
+                "y": _safe_member(note, "GetY", default=None),
+            }
+            result["status"] = "pass"
+        else:
+            result["error_code"] = "DRAWING_NOTE_CREATE_FAILED"
+    except Exception as exc:
+        result["error_code"] = "DRAWING_NOTE_CREATE_FAILED"
+        result["error"] = str(exc)
+    return result
+
+
+def _iter_drawing_notes(drawing_model):
+    """@brief 遍历图纸全部注释(含图框模板注释与视图注释),返回 (view_name, note)。"""
+    pairs = []
+    current = _safe_member(drawing_model, "GetFirstView")
+    guard = 0
+    while current is not None and guard < 2000:
+        view_name = str(_safe_member(current, "Name", default="") or "")
+        for note in _as_sequence(_safe_member(current, "GetNotes", default=[])):
+            pairs.append((view_name, note))
+        nxt = _safe_member(current, "GetNextView")
+        if nxt is None or nxt is current:
+            break
+        current = nxt
+        guard += 1
+    return pairs
+
+
+def probe_title_block_links(drawing_model):
+    """@brief 探测图框标题栏注释是否与自定义属性联动(含 $PRP 占位符)。
+
+    官方 GB 模板标题栏单元格若为 "$PRP:xxx" 形式,写文档自定义属性即可自动
+    填充;若为空白文本则只能用注释克位兜底。只读,不修改文档。
+    """
+    fields = []
+    texts = []
+    for _view_name, note in _iter_drawing_notes(drawing_model):
+        text = str(_safe_member(note, "Text", default="") or _safe_member(note, "GetText", default="") or "")
+        if not text:
+            continue
+        texts.append(text)
+        for match in re.findall(r"\$PRP(?:SHEET)?\s*:?\s*\"?([^\$\"]+)\"?", text):
+            name = match.strip()
+            if name and name not in fields:
+                fields.append(name)
+    return {
+        "status": "pass",
+        "stage": "title_block_probe",
+        "linked": bool(fields),
+        "linked_fields": fields,
+        "note_count": len(texts),
+        "evidence_texts": texts[:40],
+        "manual_review_required": True,
+    }
+
+
+def fill_title_block(drawing_model, fields, *, note_x=0.045, note_y_from_top=0.035):
+    """@brief 填充标题栏字段:优先属性联动,空白标题栏退回文字注释克位。
+
+    属性联动路线:文档级 CustomPropertyManager 写入,图框 "$PRP" 注释自动刷新
+    (需先 probe_title_block_links 确认模板支持);注释克位路线:CreateText2 在
+    图纸左上角写一行"零件/材料/数量/比例"信息(SW2024 电机项目实证的兜底方案,
+    GB 官方模板标题栏单元格为空)。
+    """
+    fields = {str(key): value for key, value in dict(fields or {}).items() if value is not None}
+    result = {
+        "status": "review_required",
+        "stage": "title_block",
+        "method_used": None,
+        "fields_written": [],
+        "note_evidence": None,
+        "probe": None,
+        "manual_review_required": True,
+        "retryable": False,
+        "error_code": None,
+    }
+    if not fields:
+        result["error_code"] = "DRAWING_TITLE_BLOCK_NO_FIELDS"
+        return result
+    probe = probe_title_block_links(drawing_model)
+    result["probe"] = probe
+    if probe["linked"]:
+        extension = _safe_member(drawing_model, "Extension", default=None)
+        manager = _safe_member(extension, "CustomPropertyManager", "", default=None) if extension is not None else None
+        if manager is not None:
+            written = []
+            try:
+                for name, value in fields.items():
+                    added = _safe_member(manager, "Add3", name, 30, str(value), 1, default=False)
+                    if not added:
+                        added = _safe_member(manager, "Set2", name, str(value), default=False)
+                    if added:
+                        written.append(name)
+                result["method_used"] = "custom_properties"
+                result["fields_written"] = written
+                result["status"] = "pass" if written else "review_required"
+                if not written:
+                    result["error_code"] = "DRAWING_TITLE_BLOCK_PROPERTY_WRITE_FAILED"
+                return result
+            except Exception as exc:
+                result["error_code"] = "DRAWING_TITLE_BLOCK_PROPERTY_WRITE_FAILED"
+                result["error"] = str(exc)
+                # 属性写入失败继续走注释兜底,不直接返回。
+    # 注释克位兜底:GB 标题栏材料/名称单元格为空,用左上角信息行补足(实证方案)。
+    sheet = _safe_member(drawing_model, "GetCurrentSheet")
+    sheet_height = _finite_positive(_safe_member(sheet, "Height"), 0.297)[0]
+    note_text = "   ".join(f"{key}:{value}" for key, value in fields.items())
+    note = add_text_note(drawing_model, note_text, note_x, sheet_height - note_y_from_top)
+    result["method_used"] = "text_note_fallback"
+    result["fields_written"] = list(fields)
+    result["note_evidence"] = note
+    result["status"] = note["status"]
+    return result
+
+
+def _plan_tolerance_resolver(plan):
+    """@brief 把计划中的总体尺寸公差条目接成 scan_view_dimensions 的解析器。"""
+    entries = {
+        str(item.get("id")): item
+        for item in ((plan.get("dimensioning") or {}).get("overall_dimensions") or [])
+    }
+
+    def resolver(dim_id, nominal_mm):
+        """@brief 按 W/H/D 返回计划公差;计划缺失时返回 None 走默认分档。"""
+        entry = entries.get(str(dim_id))
+        if not entry:
+            return None
+        tolerance = entry.get("tolerance") or {}
+        if tolerance.get("source") == "explicit" or "plus_mm" in tolerance:
+            return {
+                "tol_type": SW_TOL_SYMMETRIC if tolerance.get("type", "symmetric") == "symmetric" else SW_TOL_BILATERAL,
+                "plus_mm": tolerance.get("plus_mm"),
+                "minus_mm": tolerance.get("minus_mm"),
+            }
+        return None
+
+    return resolver
+
+
+_STATUS_SEVERITY = {"pass": 0, "review_required": 1, "blocked": 2, "failed": 3}
+
+
+def _worst_status(stages):
+    """@brief 汇总各阶段状态,取最严重者。"""
+    worst = "pass"
+    for status in stages:
+        if _STATUS_SEVERITY.get(status, 3) > _STATUS_SEVERITY.get(worst, 0):
+            worst = status
+    return worst
+
+
+def generate_manufacturing_drawing(sw, plan, out_dir, *, sheet_format_candidates=None):
+    """@brief 按制造零件图计划端到端生成 GB 工程图并导出 PDF(总编排)。
+
+    流程(顺序硬约束见本节头部注释):
+      校验计划 → 开零件 → 新建工程图(可选 .drwdot 模板)→ 套图框(.slddrt)→
+      文档级偏好(先于视图!)→ 按计划建三视图并强制真实比例 → 先存盘再激活 →
+      尺寸标注(scan/model_only 按计划策略)→ 标题栏填充 → 技术要求注释 →
+      重建存盘 → 导出 PDF。
+
+    返回 {status, stage, stages, artifacts, manual_review_required};产物路径在
+    artifacts.slddrw / artifacts.pdf,供审查层(review_manufacturing_drawing)
+    做结构/布局/PDF 文字三重证据复核。执行层永不自动 pass 交付。
+    """
+    report = {
+        "status": "failed",
+        "stage": "execute",
+        "schema": "manufacturing_drawing_execution/1.0",
+        "stages": {},
+        "artifacts": {},
+        "manual_review_required": True,
+        "retryable": True,
+        "error_code": None,
+    }
+    try:
+        part_path = str(((plan or {}).get("part") or {}).get("path") or "").strip()
+        nominal = ((plan or {}).get("part") or {}).get("nominal") or {}
+        views_spec = (plan or {}).get("views") or []
+        frame = (plan or {}).get("frame") or {}
+        if not part_path or len(views_spec) < 3 or not nominal:
+            report["error_code"] = "DRAWING_EXEC_PLAN_INVALID"
+            return report
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        stem = Path(part_path).stem
+        slddrw_path = out_dir / f"{stem}.SLDDRW"
+        pdf_path = out_dir / f"{stem}.pdf"
+
+        # 1) 零件进入会话(CreateDrawViewFromModelView3 需要模型已打开)。
+        part_model = open_document(sw, part_path, silent=True)
+        report["stages"]["open_part"] = {
+            "status": "pass" if part_model is not None else "review_required",
+            "part_path": part_path,
+        }
+
+        # 2) 新建工程图:优先 .drwdot 文档模板,否则默认空图。
+        paper_size = str(frame.get("paper_size") or "A3").upper()
+        paper_spec = PAPER_SIZES.get(paper_size, PAPER_SIZES["A3"])
+        template_path = frame.get("template_path")
+        if template_path and Path(template_path).is_file():
+            drawing_model = get_com_member(sw, "NewDocument", str(template_path), paper_spec["code"], 0.0, 0.0)
+        else:
+            drawing_model = new_document(sw, "drawing")
+        if drawing_model is None:
+            report["error_code"] = "DRAWING_EXEC_NEW_DOCUMENT_FAILED"
+            report["stages"]["new_document"] = {"status": "failed", "template_path": template_path}
+            return report
+        report["stages"]["new_document"] = {"status": "pass", "template_path": template_path}
+
+        # 3) 套图框(.slddrt):显式路径 > 本机候选 > 跳过并告警。
+        format_path = frame.get("sheet_format_path")
+        if not format_path and sheet_format_candidates:
+            selection = select_drawing_template(sheet_format_candidates, paper_size=paper_size)
+            format_path = selection.get("selected")
+            report["stages"]["select_format"] = selection
+        if format_path:
+            report["stages"]["sheet_format"] = setup_sheet_format(drawing_model, paper_size, format_path)
+        else:
+            report["stages"]["sheet_format"] = {
+                "status": "review_required",
+                "configured": False,
+                "error_code": "DRAWING_FORMAT_NOT_SPECIFIED",
+                "message": "未提供图框且未找到本机候选,图框需人工确认",
+            }
+
+        # 4) 文档级偏好:必须先于视图/尺寸(创建即锁定)。
+        report["stages"]["preferences"] = set_drawing_document_preferences(drawing_model)
+
+        # 5) 按计划建三视图 + 强制真实比例(UseSheetScale 默认会忽略 Scale 参数)。
+        scale = float((plan or {}).get("scale") or 1.0)
+        created_views = {}
+        for item in views_spec:
+            center = item["center"]
+            view = get_com_member(
+                drawing_model,
+                "CreateDrawViewFromModelView3",
+                part_path,
+                item["name"],
+                float(center[0]),
+                float(center[1]),
+                scale,
+            )
+            if view is None:
+                report["error_code"] = "DRAWING_EXEC_VIEW_CREATE_FAILED"
+                report["stages"]["create_views"] = {"status": "failed", "failed_view": item["name"]}
+                return report
+            created_views[item["name"]] = view
+        scale_reports = [force_view_scale(view, scale, drawing_model=drawing_model) for view in created_views.values()]
+        report["stages"]["create_views"] = {
+            "status": _worst_status(item["status"] for item in scale_reports),
+            "views": list(created_views),
+            "scale_reports": scale_reports,
+        }
+        get_com_member(drawing_model, "EditRebuild3")
+
+        # 6) 先存盘提交视图几何(未存盘视图只暴露部分剪影边),再强制激活
+        #    (SelectByID2 作用于活动文档)。
+        saved = get_com_member(drawing_model, "SaveAs3", str(slddrw_path), 0, 0)
+        errors_variant = VARIANT(pythoncom.VT_BYREF | pythoncom.VT_I4, 0)
+        title = str(_safe_member(drawing_model, "GetTitle", default="") or "")
+        try:
+            get_com_member(sw, "ActivateDoc3", title, False, 0, errors_variant)
+        except Exception:
+            pass
+        report["stages"]["commit"] = {
+            "status": "pass" if saved else "review_required",
+            "slddrw": str(slddrw_path),
+            "saved": bool(saved),
+        }
+
+        # 7) 尺寸标注:scan=坐标扫描 W/H/D+计划公差;model_only=仅模型尺寸。
+        strategy = str(((plan or {}).get("dimensioning") or {}).get("strategy") or "scan")
+        pickability = {name: pickability_ok(view) for name, view in created_views.items()}
+        if strategy == "scan" and all(item["status"] == "pass" for item in pickability.values()):
+            scan_report = scan_view_dimensions(
+                drawing_model,
+                created_views.get("*Front"),
+                created_views.get("*Top"),
+                nominal_width_mm=float(nominal.get("width_mm", 0.0)),
+                nominal_height_mm=float(nominal.get("height_mm", 0.0)),
+                nominal_depth_mm=float(nominal.get("depth_mm", 0.0)),
+                tolerance_resolver=_plan_tolerance_resolver(plan),
+            )
+            report["stages"]["dimensioning"] = {
+                "status": scan_report["status"],
+                "strategy": "scan",
+                "report": scan_report,
+            }
+        else:
+            inserted = insert_dimensions(drawing_model)
+            inserted_count = len(_as_sequence(inserted)) if inserted else 0
+            report["stages"]["dimensioning"] = {
+                "status": "pass" if inserted_count else "review_required",
+                "strategy": "model_only",
+                "inserted_count": inserted_count,
+                "pickability": pickability,
+                "error_code": None if inserted_count else "DRAWING_MODEL_DIMENSIONS_EMPTY",
+            }
+
+        # 8) 标题栏填充(属性联动优先,注释克位兜底)+ 技术要求注释。
+        report["stages"]["title_block"] = fill_title_block(
+            drawing_model,
+            ((plan or {}).get("title_block") or {}).get("fields") or {},
+        )
+        sheet = _safe_member(drawing_model, "GetCurrentSheet")
+        sheet_height = _finite_positive(_safe_member(sheet, "Height"), 0.297)[0]
+        tech_lines = (((plan or {}).get("technical_requirements") or {}).get("lines")) or []
+        tech_reports = [
+            add_text_note(drawing_model, line, 0.045, sheet_height * 0.35 - index * 0.009)
+            for index, line in enumerate(tech_lines)
+        ]
+        report["stages"]["technical_requirements"] = {
+            "status": _worst_status(item["status"] for item in tech_reports) if tech_reports else "review_required",
+            "lines": tech_lines,
+            "notes": tech_reports,
+        }
+
+        # 9) 重建、存盘、导出 PDF。
+        get_com_member(drawing_model, "EditRebuild3")
+        get_com_member(drawing_model, "SaveAs3", str(slddrw_path), 0, 0)
+        pdf_ok = export_sheet_to_pdf(drawing_model, str(pdf_path), sw_app=sw)
+        report["stages"]["export_pdf"] = {
+            "status": "pass" if pdf_ok else "failed",
+            "pdf": str(pdf_path),
+            "error_code": None if pdf_ok else "DRAWING_EXEC_PDF_EXPORT_FAILED",
+        }
+
+        report["artifacts"] = {
+            "slddrw": str(slddrw_path),
+            "pdf": str(pdf_path) if pdf_ok else None,
+        }
+        stage_status = {
+            name: item.get("status", "failed") if isinstance(item, dict) else "failed"
+            for name, item in report["stages"].items()
+        }
+        report["status"] = _worst_status(stage_status.values())
+        report["error_code"] = next(
+            (item.get("error_code") for item in report["stages"].values()
+             if isinstance(item, dict) and item.get("status") in {"failed", "blocked"} and item.get("error_code")),
+            None,
+        )
+        if report["status"] == "pass":
+            # 尺寸位置/重叠/尺寸链仍需目视复核,执行层永不自动 pass 交付。
+            report["status"] = "review_required"
+        return report
+    except Exception as exc:
+        report["error_code"] = "DRAWING_EXEC_FAILED"
+        report["error"] = str(exc)
+        return report

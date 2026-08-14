@@ -1,0 +1,237 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Manufacturing Drawing Plan",
+  "description": "制造零件图计划契约:由 scripts/sw_drawing_plan.plan_manufacturing_drawing 生成,scripts/sw_drawing.generate_manufacturing_drawing 执行,schemas 版本 manufacturing_drawing_plan/1.0。",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["schema", "status", "stage", "part", "frame", "views", "scale", "dimensioning", "title_block", "technical_requirements", "checks"],
+  "properties": {
+    "schema": {
+      "type": "string",
+      "const": "manufacturing_drawing_plan/1.0"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["pass", "review_required", "blocked"]
+    },
+    "stage": {
+      "type": "string",
+      "const": "plan"
+    },
+    "part": {
+      "type": "object",
+      "required": ["path", "nominal"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "nominal": {
+          "type": "object",
+          "required": ["width_mm", "height_mm", "depth_mm"],
+          "properties": {
+            "width_mm": { "type": "number", "exclusiveMinimum": 0 },
+            "height_mm": { "type": "number", "exclusiveMinimum": 0 },
+            "depth_mm": { "type": "number", "exclusiveMinimum": 0 }
+          }
+        }
+      }
+    },
+    "frame": {
+      "type": "object",
+      "required": ["paper_size", "projection", "sheet", "title_block_box"],
+      "properties": {
+        "paper_size": {
+          "type": "string",
+          "enum": ["A4", "A3", "A2", "A1", "A0"]
+        },
+        "projection": {
+          "type": "string",
+          "enum": ["first_angle", "third_angle"]
+        },
+        "template_path": {
+          "type": ["string", "null"],
+          "description": "工程图文档模板(.drwdot),可选"
+        },
+        "sheet_format_path": {
+          "type": ["string", "null"],
+          "description": "图纸格式/图框(.slddrt),可选;为空时仅设置图幅不套图框"
+        },
+        "sheet": {
+          "type": "object",
+          "required": ["width_m", "height_m"],
+          "properties": {
+            "width_m": { "type": "number", "exclusiveMinimum": 0 },
+            "height_m": { "type": "number", "exclusiveMinimum": 0 }
+          }
+        },
+        "title_block_box": {
+          "$ref": "#/$defs/box"
+        }
+      }
+    },
+    "views": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "required": ["name", "center", "box"],
+        "properties": {
+          "name": {
+            "type": "string",
+            "enum": ["*Front", "*Top", "*Right"]
+          },
+          "center": {
+            "type": "array",
+            "items": { "type": "number" },
+            "minItems": 2,
+            "maxItems": 2
+          },
+          "box": { "$ref": "#/$defs/box" }
+        }
+      }
+    },
+    "scale": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "视图比例,如 2.0 表示 2:1,0.5 表示 1:2"
+    },
+    "scale_ratio": {
+      "type": "array",
+      "items": { "type": "integer" },
+      "minItems": 2,
+      "maxItems": 2
+    },
+    "scale_ratio_text": {
+      "type": "string",
+      "pattern": "^[0-9]+:[0-9]+$"
+    },
+    "dimensioning": {
+      "type": "object",
+      "required": ["strategy", "overall_dimensions"],
+      "properties": {
+        "strategy": {
+          "type": "string",
+          "enum": ["scan", "model_only"],
+          "description": "scan=坐标扫描标注(要求比例≥1:2);model_only=仅插入模型尺寸"
+        },
+        "fallback_reason": { "type": "string" },
+        "overall_dimensions": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {
+            "type": "object",
+            "required": ["id", "nominal_mm", "tolerance"],
+            "properties": {
+              "id": {
+                "type": "string",
+                "enum": ["W", "H", "D"]
+              },
+              "nominal_mm": { "type": "number", "exclusiveMinimum": 0 },
+              "tolerance": {
+                "type": "object",
+                "required": ["type", "plus_mm", "minus_mm", "source"],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": ["symmetric", "bilateral"]
+                  },
+                  "plus_mm": { "type": "number", "minimum": 0 },
+                  "minus_mm": { "type": "number", "minimum": 0 },
+                  "source": {
+                    "type": "string",
+                    "enum": ["gb1804-m", "fit_suggestion", "explicit"]
+                  },
+                  "grade": { "type": "string" }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "mating_dimension_candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["diameter_mm", "source", "review_required"],
+        "properties": {
+          "diameter_mm": { "type": "number", "exclusiveMinimum": 0 },
+          "source": { "type": "string" },
+          "suggestion": {
+            "type": ["string", "null"],
+            "description": "配合代号建议(如 H7);为空表示尚未给出"
+          },
+          "review_required": { "type": "boolean" }
+        }
+      }
+    },
+    "title_block": {
+      "type": "object",
+      "required": ["fields", "auto_fields"],
+      "properties": {
+        "fields": {
+          "type": "object",
+          "description": "标题栏字段键值,如 名称/图号/材料/数量/比例/重量/设计/日期"
+        },
+        "auto_fields": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "由证据自动推导的字段名(如 比例、重量)"
+        }
+      }
+    },
+    "technical_requirements": {
+      "type": "object",
+      "required": ["lines"],
+      "properties": {
+        "lines": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "tolerance_grade": {
+      "type": "string",
+      "enum": ["f", "m", "c", "v"]
+    },
+    "checks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "status", "message"],
+        "properties": {
+          "id": { "type": "string" },
+          "status": { "type": "string", "enum": ["pass", "fail", "warning"] },
+          "message": { "type": "string" }
+        }
+      }
+    },
+    "error_code": {
+      "type": ["string", "null"]
+    },
+    "manual_review_required": {
+      "type": "boolean",
+      "const": true
+    },
+    "limitations": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "box": {
+      "type": "object",
+      "required": ["left", "bottom", "right", "top"],
+      "properties": {
+        "left": { "type": "number" },
+        "bottom": { "type": "number" },
+        "right": { "type": "number" },
+        "top": { "type": "number" }
+      }
+    }
+  }
+}

@@ -16,9 +16,11 @@ from pathlib import Path
 try:
     from .sw_connect import connect_solidworks, get_com_member, open_document
     from .sw_preflight import import_com_dependencies
+    from .sw_drawing import inspect_drawing_structure
 except ImportError:
     from sw_connect import connect_solidworks, get_com_member, open_document
     from sw_preflight import import_com_dependencies
+    from sw_drawing import inspect_drawing_structure
 
 
 pythoncom, _win32com, VARIANT = import_com_dependencies()
@@ -1088,6 +1090,130 @@ def main():
     if args.fail_on_warn and evaluation["status"] == "warn":
         return 1
     return 0
+
+
+# =============================================================================
+# 制造零件图审查门禁(manufacturing_drawing_generation)
+# 组合三重证据:工程图结构(inspect_drawing_structure)+ 布局碰撞
+# (review_drawing_layout)+ PDF 矢量文字重叠(inspect_pdf_text_layout),
+# 并把 PDF 首页渲染为 PNG 作为目视证据。证据强度:PDF 矢量文字 > COM 锚点/
+# 字体估算 > OCR;估算证据只 review_required,不 blocked。
+# =============================================================================
+
+_REVIEW_STATUS_SEVERITY = {"pass": 0, "review_required": 1, "blocked": 2, "failed": 3}
+
+
+def _review_worst_status(statuses):
+    """@brief 取最严重状态。"""
+    worst = "pass"
+    for status in statuses:
+        if _REVIEW_STATUS_SEVERITY.get(status, 3) > _REVIEW_STATUS_SEVERITY.get(worst, 0):
+            worst = status
+    return worst
+
+
+def render_pdf_preview_png(pdf_path, output_png, *, dpi=150):
+    """@brief 用 PyMuPDF 把 PDF 首页渲染为 PNG 目视证据;缺依赖时返回 blocked。"""
+    source = Path(str(pdf_path))
+    target = Path(str(output_png))
+    result = {
+        "status": "blocked",
+        "stage": "pdf_preview",
+        "pdf": str(source),
+        "png": str(target),
+        "rendered": False,
+        "error_code": None,
+    }
+    if not source.is_file():
+        result["error_code"] = "REVIEW_PDF_PREVIEW_SOURCE_MISSING"
+        return result
+    try:
+        fitz = _import_pdf_parser()
+    except ImportError:
+        result["error_code"] = "REVIEW_PDF_PREVIEW_PARSER_MISSING"
+        return result
+    try:
+        document = fitz.open(str(source))
+        page = document[0]
+        pixmap = page.get_pixmap(dpi=int(dpi))
+        target.parent.mkdir(parents=True, exist_ok=True)
+        pixmap.save(str(target))
+        document.close()
+        result["rendered"] = target.is_file() and target.stat().st_size > 0
+        result["status"] = "pass" if result["rendered"] else "failed"
+        if not result["rendered"]:
+            result["error_code"] = "REVIEW_PDF_PREVIEW_RENDER_FAILED"
+    except Exception as exc:
+        result["status"] = "failed"
+        result["error_code"] = "REVIEW_PDF_PREVIEW_RENDER_FAILED"
+        result["error"] = str(exc)
+    return result
+
+
+def review_manufacturing_drawing(drawing_model=None, pdf_path=None, *,
+                                 title_block_box=None, preview_png_path=None,
+                                 report_path=None, dpi=150):
+    """@brief 制造零件图三重证据审查门禁。
+
+    drawing_model: 工程图 COM 文档(结构 + 布局碰撞证据);可为 None(仅 PDF 复核)。
+    pdf_path: 导出 PDF(矢量文字重叠证据 + PNG 目视渲染);可为 None(仅 COM 复核)。
+    title_block_box: 计划层给出的标题栏边界(用于碰撞检查),None 用结构推断。
+    preview_png_path: PNG 目视证据输出路径,None 则与 PDF 同名 .png。
+    report_path: 可选 review_report.json 输出路径(golden-workflow 产物契约)。
+
+    返回汇总报告:status 取三重证据最严重者;只要存在估算证据即 review_required,
+    永不自动 pass 交付。
+    """
+    sections = {}
+    structure = None
+    if drawing_model is not None:
+        structure = inspect_drawing_structure(drawing_model, title_block_box=title_block_box)
+        sections["structure"] = structure
+        sections["layout"] = review_drawing_layout(structure)
+    if pdf_path:
+        sections["pdf_text"] = inspect_pdf_text_layout(pdf_path)
+        png_target = Path(preview_png_path) if preview_png_path else Path(str(pdf_path)).with_suffix(".png")
+        sections["pdf_preview"] = render_pdf_preview_png(pdf_path, png_target, dpi=dpi)
+
+    statuses = [item.get("status", "failed") for item in sections.values()]
+    overall = _review_worst_status(statuses)
+    error_code = next(
+        (item.get("error_code") for item in sections.values() if item.get("error_code")),
+        None,
+    )
+    if not sections:
+        overall = "blocked"
+        error_code = "REVIEW_MANUFACTURING_DRAWING_NO_EVIDENCE"
+    report = {
+        "schema": "manufacturing_drawing_review/1.0",
+        "status": overall,
+        "stage": "review",
+        "sections": sections,
+        "checks": [
+            {"id": "review-structure", "status": structure.get("status", "skipped") if structure else "skipped",
+             "message": "工程图结构证据" if structure else "未提供工程图文档,跳过结构与布局复核"},
+            {"id": "review-pdf-text", "status": sections.get("pdf_text", {}).get("status", "skipped"),
+             "message": "PDF 矢量文字重叠证据" if "pdf_text" in sections else "未提供 PDF,跳过文字重叠复核"},
+            {"id": "review-pdf-preview", "status": sections.get("pdf_preview", {}).get("status", "skipped"),
+             "message": "PNG 目视证据" if "pdf_preview" in sections else "未渲染 PNG 目视证据"},
+        ],
+        "error_code": error_code,
+        "manual_review_required": True,
+        "retryable": overall in {"blocked", "failed"},
+        "limitations": [
+            "估算包围盒只能筛风险,不能证明无重叠;最终交付必须人工目视复核",
+            "审查不覆盖尺寸链完整性、公差选用正确性与制造工艺合理性",
+        ],
+    }
+    if overall == "pass":
+        # 门禁哲学:存在任何需要人工确认的证据时不得自动 pass。
+        report["status"] = "review_required"
+    if report_path:
+        path = Path(report_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8")
+        report["report_path"] = str(path)
+    return report
 
 
 if __name__ == "__main__":
