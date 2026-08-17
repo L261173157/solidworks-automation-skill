@@ -136,17 +136,20 @@ function resolvePython(candidate) {
     if (seen.has(command)) continue;
     seen.add(command);
 
-    const args = command === 'py'
-      ? ['-3', '-c', 'import sys; print(sys.executable)']
-      : ['-c', 'import sys; print(sys.executable)'];
-    const result = run(command, args, { quiet: true });
+    // 探测代码经 stdin 传入(`python -`): 参数保持无空格/无元字符,
+    // 避免 shell 回退路径下参数被 cmd 拆断
+    const args = command === 'py' ? ['-3', '-'] : ['-'];
+    const result = run(command, args, {
+      quiet: true,
+      input: 'import sys\nprint(sys.executable)\n',
+    });
     if (result.status === 0) {
-      const executable = result.stdout.trim();
+      const executable = (result.stdout || '').trim();
       return executable || command;
     }
   }
 
-  throw new Error('Python was not found. Install Python 3.8+ and retry.');
+  throw new Error('Python was not found. Install Python 3.8+ or retry.');
 }
 
 // 命令 token 校验: 环境变量/CLI 提供的 python 命令不得包含 shell 元字符
