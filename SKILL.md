@@ -118,6 +118,7 @@ session.export(model, r"C:\temp\cylinder.step")
 | 装配 BOM CSV 与 Pack and Go | `scripts/sw_delivery.py` | `references/export.md` |
 | OBJ/STL 高还原网格参考导入 | `scripts/sw_import_mesh_reference.py` | `references/mesh-reference-import.md` |
 | 结果自审查 | `scripts/sw_review.py` | `references/review.md` |
+| 三维模型健康度与错误检查（重建门禁/特征错误码/零包络/装配干涉/工程图结构） | `scripts/sw_review.py`、`scripts/sw_assembly.py::get_interference_detection` | `references/review.md`、`references/assembly.md`；MCP 工具 `solidworks_check_interference` |
 | 质量属性（质量/体积/表面积/重心） | `scripts/sw_mass_properties.py` | `references/mass-properties.md` |
 | 测量与装配检查原语（整体尺寸/包围盒/组件计数） | `scripts/sw_inspect.py` | `references/measurement.md` |
 | 语义实体引用 | `scripts/sw_entity_reference.py` | 逐步替代 Face1/Edge1 和屏幕坐标 |
