@@ -136,11 +136,11 @@ function resolvePython(candidate) {
     if (seen.has(command)) continue;
     seen.add(command);
 
-    // 探测代码经 stdin 传入(`python -`): 参数保持无空格/无元字符,
-    // 避免 shell 回退路径下参数被 cmd 拆断
+    // 探测代码经 stdin 传入(`python -`), 命令为真实 exe, 禁用 shell 走参数数组
     const args = command === 'py' ? ['-3', '-'] : ['-'];
     const result = run(command, args, {
       quiet: true,
+      shell: false,
       input: 'import sys\nprint(sys.executable)\n',
     });
     if (result.status === 0) {
@@ -312,13 +312,15 @@ function main() {
       throw new Error(`Requirements file not found: ${requirementsPath}`);
     }
     console.log('Installing Python dependencies...');
-    const pip = run(pythonCommand, ['-m', 'pip', 'install', '-r', requirementsPath]);
+    // python/py/python.exe 都是真实可执行文件(非 .cmd 垫片), 一律禁用 shell,
+    // 参数走数组, 切断 --python 污点进入 shell 的路径
+    const pip = run(pythonCommand, ['-m', 'pip', 'install', '-r', requirementsPath], { shell: false });
     if (pip.status !== 0) {
       throw new Error('Failed to install Python dependencies.');
     }
   }
   console.log('Checking MCP server syntax...');
-  const check = run(pythonCommand, ['-m', 'py_compile', options.server]);
+  const check = run(pythonCommand, ['-m', 'py_compile', options.server], { shell: false });
   if (check.status !== 0) {
     throw new Error('MCP server syntax check failed.');
   }
