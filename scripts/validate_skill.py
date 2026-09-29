@@ -56,6 +56,8 @@ REQUIRED_FILES = [
     "requirements-pdf.txt",
     "scripts/sw_entity_reference.py",
     "scripts/sw_selection.py",
+    "scripts/api_docs_index.py",
+    "references/data/api_index.json",
     "scripts/sw_delivery_comtypes_worker.py",
     "scripts/validate_mcp.py",
     "mcp-server/server.py",

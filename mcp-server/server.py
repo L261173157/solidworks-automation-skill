@@ -69,6 +69,7 @@ def _load_automation_modules() -> None:
     drawing_review = importlib.import_module("scripts.sw_drawing_review")
     drawing_spec = importlib.import_module("scripts.drawing_spec")
     _compare_module = importlib.import_module("scripts.sw_compare")
+    _api_docs_module = importlib.import_module("scripts.api_docs_index")
 
     exports = {
         "connect_solidworks": connect.connect_solidworks,
@@ -139,6 +140,8 @@ def _load_automation_modules() -> None:
         "mass_properties": mass_module.mass_properties,
         "compare_documents": _compare_module.compare_documents,
         "collect_model_fingerprint": _compare_module.collect_model_fingerprint,
+        "api_docs_lookup": _api_docs_module.lookup,
+        "api_docs_load_index": _api_docs_module.load_index,
     }
     globals().update(exports)
     pythoncom = importlib.import_module("pythoncom")
@@ -1744,6 +1747,74 @@ def solidworks_close_documents(params: SolidWorksCloseDocumentsInput = SolidWork
         title = get_com_member(model, "GetTitle")
         sw.CloseDoc(title)
         return {"status": "ok", "closed": title}
+
+    return _run_locked(op, params.response_format)
+
+
+class SolidWorksCompareDocumentsInput(BaseInput):
+    """Input for objective document comparison."""
+
+    path_a: str = Field(..., min_length=1, description="First document path (.sldprt/.sldasm).")
+    path_b: str = Field(..., min_length=1, description="Second document path (.sldprt/.sldasm).")
+    response_format: ResponseFormat = Field(default=ResponseFormat.JSON, description="Return format.")
+
+
+class SolidWorksApiLookupInput(BaseInput):
+    """Input for offline SolidWorks API signature lookup."""
+
+    query: str = Field(..., min_length=1, description="Member or interface name substring (e.g. AddMate5).")
+    limit: int = Field(default=20, ge=1, le=100, description="Max hits returned.")
+    response_format: ResponseFormat = Field(default=ResponseFormat.JSON, description="Return format.")
+
+
+@mcp.resource("solidworks://api/{interface}")
+def solidworks_api_interface(interface: str) -> str:
+    """Offline SolidWorks API signature index for one interface (typelib facts + hand-verified notes)."""
+    _load_automation_modules()
+    index = api_docs_load_index()
+    members = index.get("interfaces", {}).get(interface)
+    if members is None:
+        return json.dumps(
+            {
+                "status": "not_found",
+                "interface": interface,
+                "available": sorted(index.get("interfaces", {}).keys()),
+                "limitations": index.get("limitations", []),
+            },
+            ensure_ascii=False,
+        )
+    curated = index.get("curated_notes", {})
+    return json.dumps(
+        {
+            "status": "ok",
+            "interface": interface,
+            "members": members,
+            "notes": {key: value for key, value in curated.items() if key.startswith(f"{interface}.")},
+        },
+        ensure_ascii=False,
+    )
+
+
+@mcp.tool(
+    name="solidworks_api_lookup",
+    title="Lookup SolidWorks API Signatures",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+def solidworks_api_lookup(params: SolidWorksApiLookupInput) -> str:
+    """Search the offline typelib signature index for API facts (name/kind/param count) before coding COM calls."""
+
+    def op():
+        return {
+            "status": "ok",
+            "query": params.query,
+            "hits": api_docs_lookup(params.query, limit=params.limit),
+            "usage_note": "以类型库签名事实为准; 调用前结合 references/api-lookup.md 的查证流程记录返回值与 by-ref 语义。",
+        }
 
     return _run_locked(op, params.response_format)
 

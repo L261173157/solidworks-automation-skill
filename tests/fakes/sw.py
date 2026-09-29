@@ -134,6 +134,8 @@ class FakeExtension:
 
     def SelectByID2(self, name, entity_type, x, y, z, append, mark, callout, options):
         self._journal.record("Extension", "SelectByID2", name, entity_type, append, mark)
+        # 真实语义: append=False 先清空选择集再选中; True 则追加。
+        self._model._selection_count = (self._model._selection_count + 1) if append else 1
         return True
 
     def SaveAs(self, path, version, options, data, errors, warnings):
@@ -153,12 +155,13 @@ class FakeExtension:
 
 
 class FakeSelectionManager:
-    def __init__(self, journal: ComJournal):
+    def __init__(self, model, journal: ComJournal):
+        self._model = model
         self._journal = journal
 
     def GetSelectedObjectCount2(self, mark):
         self._journal.record("SelectionManager", "GetSelectedObjectCount2", mark)
-        return 0
+        return self._model._selection_count
 
 
 class FakeModelDoc:
@@ -169,13 +172,14 @@ class FakeModelDoc:
         self.Extension = FakeExtension(self, journal)
         self.SketchManager = FakeSketchManager(self, journal)
         self.FeatureManager = FakeFeatureManager(self, journal)
-        self.SelectionManager = FakeSelectionManager(journal)
+        self.SelectionManager = FakeSelectionManager(self, journal)
         self.GetTitle = "未命名"
         self.GetPathName = path
         self.features: list[FakeFeature] = []
         self.sketches: list[FakeSketch] = []
         self.components: list["FakeComponent"] = []
         self._feature_counters: dict[str, int] = {}
+        self._selection_count = 0
 
     def next_feature_index(self, prefix: str) -> int:
         count = self._feature_counters.get(prefix, 0) + 1
@@ -185,6 +189,7 @@ class FakeModelDoc:
     # --- 文档级 API ---
     def ClearSelection2(self, flag):
         self._journal.record("ModelDoc", "ClearSelection2", flag)
+        self._selection_count = 0
 
     def ForceRebuild3(self, flag):
         self._journal.record("ModelDoc", "ForceRebuild3", flag)
@@ -219,6 +224,10 @@ class FakeModelDoc:
         self._journal.record("ModelDoc", "GetComponents", toplevel)
         return tuple(self.components)
 
+    def GetBodies2(self, CreaterBody, flag):
+        self._journal.record("ModelDoc", "GetBodies2", CreaterBody, flag)
+        return ()
+
     def AddComponent5(self, template, flags, x, y, z, name, path):
         self._journal.record("ModelDoc", "AddComponent5", name, x, y, z)
         return self._add_component(path)
@@ -229,6 +238,7 @@ class FakeModelDoc:
 
     def _add_component(self, path):
         component = FakeComponent(Path(path).name if path else "组件", path, self._journal)
+        component._owner_model = self
         self.components.append(component)
         return component
 
@@ -248,6 +258,7 @@ class FakeComponent:
 
     def Select4(self, append=False, mark=0):
         self._journal.record("Component", "Select4", append, mark)
+        self._owner_model._selection_count = (self._owner_model._selection_count + 1) if append else 1
         return True
 
     Select2 = Select4
