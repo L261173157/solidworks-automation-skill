@@ -4,7 +4,7 @@
 
 ## 1. 软件能做什么
 
-- 从自然语言规划并创建基础零件、外壳、夹具和装配体；钣金等未验证能力按能力清单进入人工复核或阻断。
+- 从自然语言规划并创建基础零件、外壳、夹具和装配体；SW2026 可试点创建开放轮廓基体法兰并导出展开 DXF，其余钣金能力按能力清单进入人工复核或阻断。
 - 修改已有 SLDPRT、SLDASM、STEP、STL、DWG、DXF、PDF 或参考图片。
 - 创建通孔、盲孔、沉孔、沉头孔、螺纹孔、长圆孔、半圆槽和阵列孔。
 - 无 CAD 软件时输出 `.cadstudio.json`、STL、OBJ、DXF、SVG、PDF、PNG 和复核报告；原生 SLDPRT/SLDASM/SLDDRW/DWG 需要对应 CAD 软件和已验证后端。
@@ -92,7 +92,7 @@ OCCT 当前覆盖盒体、圆柱、布尔合并、圆柱孔切除，以及独立
 python scripts/cad_studio.py doctor
 ```
 
-能力限制以仓库根目录 `capabilities.yaml` 为准。配置/设计表、钣金和焊件当前不会被标记为已交付。Simulation/FEA 可用 CalculiX 执行受限线性静力任务，复杂曲面可用 OCP 执行受限封闭直纹 Loft；二者仍是 `pilot`，缺少结果证据、网格收敛或曲面质量证明时不能冒充完整工程交付。
+能力限制以仓库根目录 `capabilities.yaml` 为准。配置族、SW2026 开放轮廓钣金和 HSS 矩形焊接框架已进入受控 `pilot`，设计表、复杂钣金/焊件仍不会被标记为完整交付。焊件必须回读 `WeldmentFeature`、`WeldMemberFeat`、每个 `CutListFolder` 的实体数、长度、数量和角度，并保存重开复核。Simulation/FEA 可用 CalculiX 执行受限线性静力任务，复杂曲面可用 OCP 执行受限封闭直纹 Loft；这些试点能力缺少结果证据、网格收敛或几何质量证明时不能冒充完整工程交付。
 
 当前 CLI 也可独立运行这些受控门禁：
 
@@ -137,6 +137,16 @@ python subskills\autocad-automation\scripts\acad_dotnet_regression.py --real-cad
 4. 不要只移动 exe；同目录 `skill` 资源是本地执行器的一部分。
 
 Windows SmartScreen 可能提示“未知发布者”，因为当前开源构建未购买商业代码签名证书。可先核对 Release 页面 SHA-256，再选择运行。
+
+### 自动更新
+
+CAD Studio Windows 桌面版启动后会静默检查一次 GitHub Release。发现新版本时，界面右下角会显示更新提示；进入“设置”可查看当前版本、版本说明和下载进度。
+
+1. 点击“下载并安装”后，软件下载更新包并验证 Tauri updater 签名。
+2. 签名有效后，Windows 安装程序会接管更新并关闭当前窗口。
+3. 检查或安装失败时，可点击“打开下载页”转到 GitHub Releases 手动下载，并按 `SHA256SUMS.txt` 复核文件。
+
+自动更新签名用于验证更新包来自本项目且未被篡改；它不等同于商业 Windows 代码签名，因此 SmartScreen 仍可能显示“未知发布者”。软件不会在未点击确认时自动安装更新。
 
 ## 4. 第一次使用
 

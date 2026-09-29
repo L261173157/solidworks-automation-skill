@@ -8,8 +8,8 @@ a single-user desktop automation surface.
 """
 from __future__ import annotations
 
-import json
 import importlib
+import json
 import os
 import platform
 import sys
@@ -21,6 +21,14 @@ from typing import Any, Dict, Literal, Optional
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+_MCP_STDOUT = sys.stdout
+for _stream in (_MCP_STDOUT, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+if __name__ == "__main__":
+    sys.stdout = sys.stderr
 
 
 SERVER_DIR = Path(__file__).resolve().parent
@@ -58,6 +66,8 @@ def _load_automation_modules() -> None:
     drawing = importlib.import_module("scripts.sw_drawing")
     inspect_module = importlib.import_module("scripts.sw_inspect")
     mass_module = importlib.import_module("scripts.sw_mass_properties")
+    drawing_review = importlib.import_module("scripts.sw_drawing_review")
+    drawing_spec = importlib.import_module("scripts.drawing_spec")
 
     exports = {
         "connect_solidworks": connect.connect_solidworks,
@@ -80,6 +90,9 @@ def _load_automation_modules() -> None:
         "export_to_step": export.export_to_step,
         "export_to_stl": export.export_to_stl,
         "batch_export_formats": export.batch_export_formats,
+        "inspect_configurations": document_data.inspect_configurations,
+        "activate_configuration": document_data.activate_configuration,
+        "create_configuration": document_data.create_configuration,
         "update_dimension_mm": document_data.update_dimension_mm,
         "set_custom_properties": document_data.set_custom_properties,
         "export_assembly_bom_csv": delivery.export_assembly_bom_csv,
@@ -87,6 +100,14 @@ def _load_automation_modules() -> None:
         "run_review": review.run_review,
         "collect_geometry_measurements": review.collect_geometry_measurements,
         "validate_hole_positions": review.validate_hole_positions,
+        "drawing_generate_from_spec": drawing.generate_drawing_from_spec,
+        "drawing_export_sheet_to_pdf": drawing.export_sheet_to_pdf,
+        "drawing_save_review_previews": review.save_review_previews,
+        "drawing_inspect_bmp_preview": review.inspect_bmp_preview,
+        "drawing_inspect_structure": drawing.inspect_drawing_structure,
+        "drawing_review_artifacts": drawing_review.review_drawing_artifacts,
+        "drawing_load_spec": drawing_spec.load_drawing_spec,
+        "drawing_validate_spec": drawing_spec.validate_drawing_spec,
         "SW_MATE_COINCIDENT": assembly.SW_MATE_COINCIDENT,
         "SW_MATE_DISTANCE": assembly.SW_MATE_DISTANCE,
         "assembly_add_component": assembly.add_component,
@@ -198,6 +219,17 @@ class SolidWorksConnectInput(BaseInput):
 
     visible: bool = Field(default=True, description="Whether a newly started SolidWorks instance should be visible.")
     wait_seconds: int = Field(default=5, ge=0, le=60, description="Seconds to wait after starting SolidWorks.")
+    response_format: ResponseFormat = Field(default=ResponseFormat.JSON, description="Return format.")
+
+
+class CadStudioBackendRouteInput(BaseInput):
+    """Input for resolving a language/runtime backend from the capability matrix."""
+
+    operation_id: str = Field(..., min_length=1, max_length=160)
+    available_backends: list[str] = Field(default_factory=list, max_length=50)
+    available_requirements: list[str] = Field(default_factory=list, max_length=50)
+    solidworks_revision: Optional[str] = Field(default=None, max_length=40)
+    exact_api: bool = Field(default=False)
     response_format: ResponseFormat = Field(default=ResponseFormat.JSON, description="Return format.")
 
 
@@ -570,6 +602,42 @@ class SolidWorksDimensionUpdateInput(BaseInput):
     response_format: ResponseFormat = Field(default=ResponseFormat.JSON, description="Return format.")
 
 
+class SolidWorksAddinHostStatusInput(BaseInput):
+    """Input for read-only C# Add-in host deployment and runtime diagnostics."""
+
+    assembly_path: Optional[str] = Field(default=None, description="Optional absolute Add-in assembly path.")
+    response_format: ResponseFormat = Field(default=ResponseFormat.JSON, description="Return format.")
+
+
+class SolidWorksConfigurationCreateInput(BaseInput):
+    """Input for creating and optionally activating a SolidWorks configuration."""
+
+    configuration_name: str = Field(..., min_length=1, max_length=240)
+    comment: str = Field(default="", max_length=1024)
+    alternate_name: str = Field(default="", max_length=240)
+    options: int = Field(default=0, ge=0, description="swConfigurationOptions2_e bitmask; default 0.")
+    if_exists: str = Field(default="reuse", pattern="^(reuse|error)$")
+    activate: bool = Field(default=True)
+    rebuild: bool = Field(default=True)
+    save: bool = Field(default=False)
+    response_format: ResponseFormat = Field(default=ResponseFormat.JSON, description="Return format.")
+
+
+class SolidWorksConfigurationInspectInput(BaseInput):
+    """Input for inspecting the active document configuration family."""
+
+    response_format: ResponseFormat = Field(default=ResponseFormat.JSON, description="Return format.")
+
+
+class SolidWorksConfigurationActivateInput(BaseInput):
+    """Input for activating and verifying an existing SolidWorks configuration."""
+
+    configuration_name: str = Field(..., min_length=1, max_length=240)
+    rebuild: bool = Field(default=True)
+    save: bool = Field(default=False)
+    response_format: ResponseFormat = Field(default=ResponseFormat.JSON, description="Return format.")
+
+
 class SolidWorksCustomPropertiesInput(BaseInput):
     """Input for setting file-level or configuration-level custom properties."""
 
@@ -632,6 +700,86 @@ class SolidWorksReviewInput(BaseInput):
     output_dir: str = Field(..., min_length=1, description="Directory for BMP previews and JSON report.")
     basename: str = Field(default="mcp_review", min_length=1, max_length=80, description="Output filename prefix.")
     response_format: ResponseFormat = Field(default=ResponseFormat.JSON, description="Return format.")
+
+
+class SolidWorksGenerateDrawingInput(BaseInput):
+    """Input for the structured SolidWorks engineering drawing workflow."""
+
+    spec_path: str = Field(..., min_length=1, description="Existing DrawingSpec v1 JSON path.")
+    output_dir: str = Field(..., min_length=1, description="Directory for SLDDRW, PDF, previews, and reports.")
+    drawing_filename: str = Field(default="drawing.slddrw", min_length=1, max_length=120)
+    overwrite: bool = Field(default=False, description="Allow replacing this run's requested drawing output.")
+    response_format: ResponseFormat = Field(default=ResponseFormat.JSON, description="Return format.")
+
+    @field_validator("spec_path")
+    @classmethod
+    def drawing_spec_must_exist(cls, value: str) -> str:
+        path = Path(os.path.expandvars(value)).expanduser()
+        if path.suffix.lower() != ".json" or not path.is_file():
+            raise ValueError(f"DrawingSpec must be an existing JSON file: {value}")
+        return value
+
+    @field_validator("drawing_filename")
+    @classmethod
+    def drawing_filename_must_be_slddrw(cls, value: str) -> str:
+        if Path(value).name != value or Path(value).suffix.lower() != ".slddrw":
+            raise ValueError("drawing_filename must be a filename ending in .slddrw")
+        return value
+
+
+class SolidWorksReviewDrawingInput(BaseInput):
+    """Input for the full engineering drawing review gate."""
+
+    drawing_path: str = Field(..., min_length=1, description="Existing .SLDDRW drawing path.")
+    spec_path: str = Field(..., min_length=1, description="Existing DrawingSpec v1 JSON path.")
+    output_dir: str = Field(..., min_length=1, description="Directory for review reports and previews.")
+    pdf_path: Optional[str] = Field(default=None, description="Optional exported PDF for vector text evidence.")
+    basename: str = Field(default="drawing_review", min_length=1, max_length=80)
+    response_format: ResponseFormat = Field(default=ResponseFormat.JSON, description="Return format.")
+
+    @field_validator("drawing_path")
+    @classmethod
+    def drawing_path_must_exist(cls, value: str) -> str:
+        path = Path(os.path.expandvars(value)).expanduser()
+        if path.suffix.lower() != ".slddrw" or not path.is_file():
+            raise ValueError(f"Drawing must be an existing .SLDDRW file: {value}")
+        return value
+
+    @field_validator("spec_path")
+    @classmethod
+    def review_spec_must_exist(cls, value: str) -> str:
+        path = Path(os.path.expandvars(value)).expanduser()
+        if path.suffix.lower() != ".json" or not path.is_file():
+            raise ValueError(f"DrawingSpec must be an existing JSON file: {value}")
+        return value
+
+    @field_validator("pdf_path")
+    @classmethod
+    def review_pdf_must_exist(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return value
+        path = Path(os.path.expandvars(value)).expanduser()
+        if path.suffix.lower() != ".pdf" or not path.is_file():
+            raise ValueError(f"PDF must be an existing file: {value}")
+        return value
+
+
+class SolidWorksInspectDrawingInput(BaseInput):
+    """Input for read-only structural drawing inspection."""
+
+    drawing_path: str = Field(..., min_length=1, description="Existing .SLDDRW drawing path.")
+    output_dir: str = Field(..., min_length=1, description="Directory for structural report and previews.")
+    basename: str = Field(default="drawing_inspect", min_length=1, max_length=80)
+    paper_size_hint: Optional[str] = Field(default=None, pattern="^(A4|A3|A2|A1|A0)$")
+    response_format: ResponseFormat = Field(default=ResponseFormat.JSON, description="Return format.")
+
+    @field_validator("drawing_path")
+    @classmethod
+    def inspect_drawing_path_must_exist(cls, value: str) -> str:
+        path = Path(os.path.expandvars(value)).expanduser()
+        if path.suffix.lower() != ".slddrw" or not path.is_file():
+            raise ValueError(f"Drawing must be an existing .SLDDRW file: {value}")
+        return value
 
 
 class SolidWorksHoleFeatureInput(BaseInput):
@@ -957,6 +1105,28 @@ def _run_locked(operation, response_format: ResponseFormat, load_automation: boo
 
 
 @mcp.tool(
+    name="cadstudio_resolve_backend",
+    title="Resolve CAD Language Backend",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def cadstudio_resolve_backend(params: CadStudioBackendRouteInput) -> str:
+    """Select Python, C#, C++, SWBasic, OCCT, AutoCAD .NET, or an external solver."""
+
+    def op():
+        from scripts.capabilities import resolve_operation_backend
+
+        return resolve_operation_backend(
+            params.operation_id,
+            available_backends=params.available_backends or None,
+            available_requirements=params.available_requirements,
+            solidworks_revision=params.solidworks_revision,
+            exact_api=params.exact_api,
+        )
+
+    return _run_locked(op, params.response_format, load_automation=False)
+
+
+@mcp.tool(
     name="cadstudio_write_open_format",
     title="Write No-CAD Open Format Artifacts",
     annotations={
@@ -1076,6 +1246,29 @@ def cadstudio_routing_preflight(params: CadStudioRoutingPreflightInput = CadStud
         from scripts.routing_review import probe_solidworks_routing
 
         return probe_solidworks_routing()
+
+    return _run_locked(op, params.response_format, load_automation=False)
+
+
+@mcp.tool(
+    name="solidworks_addin_host_status",
+    title="Probe SolidWorks C# Add-in Host",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+def solidworks_addin_host_status(
+    params: SolidWorksAddinHostStatusInput = SolidWorksAddinHostStatusInput(),
+) -> str:
+    """Inspect the Add-in assembly, exact registration scopes, diagnostics, and blockers."""
+
+    def op():
+        from scripts.sw_addin_host import probe_addin_host
+
+        return probe_addin_host(params.assembly_path)
 
     return _run_locked(op, params.response_format, load_automation=False)
 
@@ -1739,6 +1932,74 @@ def solidworks_export_active(params: SolidWorksExportInput) -> str:
 
 
 @mcp.tool(
+    name="solidworks_inspect_configurations",
+    title="Inspect SolidWorks Configurations",
+    annotations={"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def solidworks_inspect_configurations(
+    params: SolidWorksConfigurationInspectInput = SolidWorksConfigurationInspectInput(),
+) -> str:
+    """Inspect configuration names and the active configuration without modifying the document."""
+
+    def op():
+        _sw, model = _active_model_required()
+        result = inspect_configurations(model)
+        result["document"] = _model_summary(model)
+        return result
+
+    return _run_locked(op, params.response_format)
+
+
+@mcp.tool(
+    name="solidworks_create_configuration",
+    title="Create SolidWorks Configuration",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def solidworks_create_configuration(params: SolidWorksConfigurationCreateInput) -> str:
+    """Create, optionally activate, rebuild, save, and read back a configuration."""
+
+    def op():
+        _sw, model = _active_model_required()
+        result = create_configuration(
+            model,
+            params.configuration_name,
+            comment=params.comment,
+            alternate_name=params.alternate_name,
+            options=params.options,
+            if_exists=params.if_exists,
+            activate=params.activate,
+            rebuild=params.rebuild,
+            save=params.save,
+        )
+        result["document"] = _model_summary(model)
+        return result
+
+    return _run_locked(op, params.response_format)
+
+
+@mcp.tool(
+    name="solidworks_activate_configuration",
+    title="Activate SolidWorks Configuration",
+    annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
+)
+def solidworks_activate_configuration(params: SolidWorksConfigurationActivateInput) -> str:
+    """Activate an existing configuration and verify the active configuration by readback."""
+
+    def op():
+        _sw, model = _active_model_required()
+        result = activate_configuration(
+            model,
+            params.configuration_name,
+            rebuild=params.rebuild,
+            save=params.save,
+        )
+        result["document"] = _model_summary(model)
+        return result
+
+    return _run_locked(op, params.response_format)
+
+
+@mcp.tool(
     name="solidworks_update_dimension",
     title="Update Named SolidWorks Dimension",
     annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False},
@@ -1881,6 +2142,162 @@ def solidworks_review_active(params: SolidWorksReviewInput) -> str:
             "checks": report.get("checks"),
             "document": _model_summary(model),
         }
+
+    return _run_locked(op, params.response_format)
+
+
+def _drawing_report_path(output_dir: Path, basename: str) -> Path:
+    """@brief 返回工程图子技能报告路径。"""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir / f"{basename}.json"
+
+
+@mcp.tool(
+    name="solidworks_generate_drawing",
+    title="Generate SolidWorks Engineering Drawing",
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+)
+def solidworks_generate_drawing(params: SolidWorksGenerateDrawingInput) -> str:
+    """按 DrawingSpec v1 创建工程图、PDF、预览和机器审视报告。"""
+
+    def op():
+        output_dir = Path(os.path.expandvars(params.output_dir)).expanduser().resolve()
+        drawing_path = output_dir / params.drawing_filename
+        pdf_path = drawing_path.with_suffix(".pdf")
+        report_path = output_dir / f"{drawing_path.stem}_review_report.json"
+        if not params.overwrite and any(path.exists() for path in (drawing_path, pdf_path, report_path)):
+            raise ValueError("输出文件已存在；请更换 output_dir、设置 overwrite=true，或保留旧交付物并另起运行目录")
+
+        spec_validation = drawing_validate_spec(params.spec_path)
+        if spec_validation.get("status") == "blocked":
+            return spec_validation
+        spec = spec_validation["spec"]
+        source_path = Path(os.path.expandvars(str(spec["sourceModel"]))).expanduser().resolve()
+        if not source_path.is_file():
+            raise FileNotFoundError(f"DrawingSpec.sourceModel 不存在: {source_path}")
+        sw, _active = connect_solidworks(wait_seconds=1, visible=True)
+        source_model = open_document(sw, str(source_path), read_only=False, silent=True, raise_on_error=True)
+        drawing_model = new_document(sw, "drawing")
+        generation = drawing_generate_from_spec(
+            drawing_model,
+            spec,
+            str(source_path),
+            template_candidates=spec.get("templateCandidates"),
+        )
+        if generation.get("status") in {"blocked", "failed"}:
+            return generation
+        if not save_document(drawing_model, str(drawing_path)):
+            raise RuntimeError(f"工程图保存失败: {drawing_path}")
+        pdf_ok = drawing_export_sheet_to_pdf(drawing_model, str(pdf_path), sw_app=sw)
+        previews = drawing_save_review_previews(
+            drawing_model,
+            output_dir / "previews",
+            basename=drawing_path.stem,
+            views=("front", "top", "right"),
+        )
+        preview_evidence = [drawing_inspect_bmp_preview(path) for path in previews]
+        geometry_evidence = collect_geometry_measurements(source_model) if spec.get("holeRequirements") else None
+        review = drawing_review_artifacts(
+            spec,
+            structure=generation.get("structure"),
+            pdf_path=pdf_path if pdf_ok and pdf_path.is_file() else None,
+            preview_evidence=preview_evidence,
+            model_evidence=geometry_evidence,
+        )
+        payload = {
+            "status": review.get("status", "review_required"),
+            "capability": "solidworks-engineering-drawing",
+            "sourceModel": str(source_path),
+            "outputs": {
+                "slddrw": {"path": str(drawing_path), "exists": drawing_path.is_file(), "size_bytes": drawing_path.stat().st_size if drawing_path.is_file() else 0},
+                "pdf": {"path": str(pdf_path), "exists": pdf_path.is_file(), "size_bytes": pdf_path.stat().st_size if pdf_path.is_file() else 0},
+                "previews": preview_evidence,
+            },
+            "generation": generation,
+            "review": review,
+            "manual_review_required": bool(review.get("manual_review_required", True)),
+        }
+        report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        payload["reportPath"] = str(report_path)
+        return payload
+
+    return _run_locked(op, params.response_format)
+
+
+@mcp.tool(
+    name="solidworks_review_drawing",
+    title="Review SolidWorks Engineering Drawing",
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+)
+def solidworks_review_drawing(params: SolidWorksReviewDrawingInput) -> str:
+    """打开工程图并执行 DrawingSpec、布局、尺寸、孔槽和 PDF 证据审视。"""
+
+    def op():
+        output_dir = Path(os.path.expandvars(params.output_dir)).expanduser().resolve()
+        report_path = _drawing_report_path(output_dir, params.basename)
+        sw, _active = connect_solidworks(wait_seconds=1, visible=True)
+        drawing_model = open_document(sw, params.drawing_path, read_only=True, silent=True, raise_on_error=True)
+        structure = drawing_inspect_structure(drawing_model)
+        previews = drawing_save_review_previews(
+            drawing_model,
+            output_dir / "previews",
+            basename=params.basename,
+            views=("front", "top", "right"),
+        )
+        preview_evidence = [drawing_inspect_bmp_preview(path) for path in previews]
+        review = drawing_review_artifacts(
+            params.spec_path,
+            structure=structure,
+            pdf_path=params.pdf_path,
+            preview_evidence=preview_evidence,
+        )
+        payload = {"status": review.get("status"), "drawingPath": str(Path(params.drawing_path).resolve()), "structure": structure, "previews": preview_evidence, "review": review, "manual_review_required": bool(review.get("manual_review_required", True))}
+        report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        payload["reportPath"] = str(report_path)
+        return payload
+
+    return _run_locked(op, params.response_format)
+
+
+@mcp.tool(
+    name="solidworks_inspect_drawing",
+    title="Inspect SolidWorks Drawing Structure",
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    },
+)
+def solidworks_inspect_drawing(params: SolidWorksInspectDrawingInput) -> str:
+    """只读读取工程图页、视图、尺寸、注释和表格结构，并生成预览证据。"""
+
+    def op():
+        output_dir = Path(os.path.expandvars(params.output_dir)).expanduser().resolve()
+        report_path = _drawing_report_path(output_dir, params.basename)
+        sw, _active = connect_solidworks(wait_seconds=1, visible=True)
+        drawing_model = open_document(sw, params.drawing_path, read_only=True, silent=True, raise_on_error=True)
+        structure = drawing_inspect_structure(drawing_model, paper_size_hint=params.paper_size_hint)
+        previews = drawing_save_review_previews(
+            drawing_model,
+            output_dir / "previews",
+            basename=params.basename,
+            views=("front", "top", "right"),
+        )
+        payload = {"status": structure.get("status"), "drawingPath": str(Path(params.drawing_path).resolve()), "structure": structure, "previews": [drawing_inspect_bmp_preview(path) for path in previews], "manual_review_required": True}
+        report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        payload["reportPath"] = str(report_path)
+        return payload
 
     return _run_locked(op, params.response_format)
 
@@ -2213,6 +2630,8 @@ def solidworks_create_manufacturing_drawing(params: SolidWorksCreateDrawingInput
 
 def main() -> None:
     """Run the SolidWorks MCP server over stdio."""
+    if sys.stdout is not _MCP_STDOUT:
+        sys.stdout = _MCP_STDOUT
     mcp.run(transport="stdio")
 
 

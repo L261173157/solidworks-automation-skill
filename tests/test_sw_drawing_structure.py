@@ -6,6 +6,7 @@ import pytest
 from scripts.sw_drawing import (
     add_a3_sheet,
     auto_arrange_drawing_dimensions,
+    auto_insert_center_marks,
     create_adaptive_standard_views,
     estimate_dimension_text_box,
     inspect_drawing_structure,
@@ -139,6 +140,396 @@ def test_inspect_drawing_structure_reports_views_dimensions_and_template():
     assert result["paper_size"] == "A3"
     assert result["view_outline_count"] == 1
     assert result["dimension_box_count"] == 1
+
+
+def test_inspect_drawing_structure_reads_real_bom_type_cells_and_configuration():
+    """@brief BOM 证据必须包含官方表类型、数据行和引用配置。"""
+    class BomFeature:
+        Configuration = "Default"
+
+    class BomTable:
+        Type = 2
+        RowCount = 2
+        ColumnCount = 3
+        Title = "材料明细表"
+
+        def __init__(self):
+            self.BomFeature = BomFeature()
+
+        def DisplayedText2(self, row, column, include_hidden):
+            assert include_hidden is False
+            return (("序号", "零件号", "数量"), ("1", "PLATE-01", "2"))[row][column]
+
+        def GetAnnotation(self):
+            return None
+
+    class View(FakeView):
+        def GetTableAnnotations(self):
+            return [BomTable()]
+
+    class Sheet(FakeSheet):
+        def GetViews(self):
+            return [View()]
+
+    class Drawing(FakeDrawing):
+        def GetSheet(self, _name):
+            return Sheet()
+
+    result = inspect_drawing_structure(Drawing())
+
+    assert result["tables"][0]["kind"] == "bom"
+    assert result["tables"][0]["row_count"] == 2
+    assert result["tables"][0]["configuration"] == "Default"
+    assert result["tables"][0]["cells"][1] == ["1", "PLATE-01", "2"]
+
+
+def test_inspect_drawing_structure_maps_blank_projected_orientations_semantically():
+    """@brief SW2026 投影视图方向名为空时，按基准关系与位置回读 front/top/right。"""
+    class View:
+        ScaleRatio = (1.0, 1.0)
+
+        def __init__(self, name, orientation, position, base=None):
+            self.Name = name
+            self.Type = 7 if base is None else 4
+            self.Position = position
+            self.orientation = orientation
+            self.base = base
+
+        def GetOrientationName(self):
+            return self.orientation
+
+        def GetBaseView(self):
+            return self.base
+
+        def GetOutline(self):
+            x, y = self.Position
+            return (x - 0.02, y - 0.01, x + 0.02, y + 0.01)
+
+        def GetDisplayDimensions(self):
+            return []
+
+        def GetNotes(self):
+            return []
+
+        def GetTableAnnotations(self):
+            return []
+
+    front = View("工程图视图1", "*前视", (0.15, 0.13))
+    top = View("工程图视图2", "", (0.15, 0.22), front)
+    right = View("工程图视图3", "", (0.26, 0.13), front)
+
+    class Sheet(FakeSheet):
+        def GetViews(self):
+            return [front, top, right]
+
+    class Drawing(FakeDrawing):
+        def GetSheet(self, _name):
+            return Sheet()
+
+    result = inspect_drawing_structure(Drawing())
+
+    assert {item["name"]: item["semantic_view"] for item in result["views"]} == {
+        "工程图视图1": "front",
+        "工程图视图2": "top",
+        "工程图视图3": "right",
+    }
+
+
+def test_inspect_drawing_structure_reads_professional_annotation_entities():
+    """@brief 专业标注必须由 IView/IDisplayDimension 实体回读，不能由普通注释推断。"""
+    class AnnotationEntity:
+        def __init__(self, texts=()):
+            self.texts = list(texts)
+
+        def GetAnnotation(self):
+            return self
+
+        def GetBox(self):
+            return (0.20, 0.20, 0.0, 0.22, 0.21, 0.0)
+
+        def GetTextCount(self):
+            return len(self.texts)
+
+        def GetTextAtIndex(self, index):
+            return self.texts[index]
+
+    class CenterMark(AnnotationEntity):
+        Size = 0.004
+        ShowLines = True
+        Style = 1
+
+    class Datum(AnnotationEntity):
+        def GetLabel(self):
+            return "A"
+
+    class Gtol(AnnotationEntity):
+        def GetFrameCount(self):
+            return 1
+
+        def GetDatumIdentifier(self):
+            return "A"
+
+        def GetFrameSymbols3(self, index):
+            assert index == 0
+            return ["POSITION"]
+
+        def GetFrameValues(self, index):
+            assert index == 0
+            return ["0.1", "A"]
+
+    class SurfaceFinish(AnnotationEntity):
+        def GetSymbolType(self):
+            return 1
+
+        def GetSymbol(self):
+            return 2
+
+        def GetDirectionOfLay(self):
+            return 0
+
+    class HoleCallout(FakeDimension):
+        Name = "D-HOLE"
+
+        def IsHoleCallout(self):
+            return True
+
+        def GetHoleCalloutVariables(self):
+            return ["DIAMETER=8", "THRU=True"]
+
+        def GetText(self, _index):
+            return "Ø8 THRU"
+
+    class View(FakeView):
+        def GetDisplayDimensions(self):
+            return [HoleCallout()]
+
+        def GetCenterMarks(self):
+            return [CenterMark()]
+
+        def GetCenterLines(self):
+            return [AnnotationEntity()]
+
+        def GetDatumTags(self):
+            return [Datum(["A"])]
+
+        def GetGTols(self):
+            return [Gtol(["0.1", "A"])]
+
+        def GetSFSymbols(self):
+            return [SurfaceFinish(["Ra 3.2"])]
+
+        def GetWeldSymbols(self):
+            return [AnnotationEntity(["6", "FILLET"])]
+
+    class Sheet(FakeSheet):
+        def GetViews(self):
+            return [View()]
+
+    class Drawing(FakeDrawing):
+        def GetSheet(self, _name):
+            return Sheet()
+
+    result = inspect_drawing_structure(Drawing())
+    evidence = result["professional_annotations"]
+
+    assert len(evidence["center_marks"]) == 1
+    assert len(evidence["center_lines"]) == 1
+    assert evidence["datum_tags"][0]["label"] == "A"
+    assert evidence["geometric_tolerances"][0]["frames"][0]["values"] == ["0.1", "A"]
+    assert evidence["surface_finish_symbols"][0]["text_parts"] == ["Ra 3.2"]
+    assert evidence["weld_symbols"][0]["text_parts"] == ["6", "FILLET"]
+    assert evidence["hole_callouts"][0]["variables"] == ["DIAMETER=8", "THRU=True"]
+
+
+def test_inspect_drawing_structure_traverses_annotation_center_marks():
+    """@brief 注解型中心标记必须通过 GetFirstCenterMark2/GetNext 回读。"""
+    class CenterMark:
+        Size = 0.004
+        ShowLines = True
+        Style = 1
+
+        def __init__(self, next_mark=None):
+            self.next_mark = next_mark
+
+        def GetNext(self):
+            return self.next_mark
+
+    second = CenterMark()
+    first = CenterMark(second)
+
+    class View(FakeView):
+        def GetFirstCenterMark2(self):
+            return first
+
+        def GetCenterMarks(self):
+            return []
+
+    class Sheet(FakeSheet):
+        def GetViews(self):
+            return [View()]
+
+    class Drawing(FakeDrawing):
+        def GetSheet(self, _name):
+            return Sheet()
+
+    result = inspect_drawing_structure(Drawing())
+
+    assert len(result["professional_annotations"]["center_marks"]) == 2
+
+
+def test_auto_insert_center_marks_uses_verified_enum_and_entity_readback():
+    """@brief API 参数必须与已确认枚举一致，成功状态必须来自实体数量回读。"""
+    class CenterMark:
+        def __init__(self, next_mark=None):
+            self.next_mark = next_mark
+
+        def GetNext(self):
+            return self.next_mark
+
+    class View:
+        ScaleRatio = (1.0, 1.0)
+
+        def __init__(self, orientation, view_type, position):
+            self.orientation = orientation
+            self.Name = f"View-{orientation}"
+            self.Type = view_type
+            self.Position = position
+            self.calls = []
+            self.first_mark = None
+
+        def GetOrientationName(self):
+            return self.orientation
+
+        def GetBaseView(self):
+            return None if self.Type == 7 else front
+
+        def GetFirstCenterMark2(self):
+            return self.first_mark
+
+        def GetCenterMarks(self):
+            return []
+
+        def AutoInsertCenterMarks2(self, *args):
+            self.calls.append(args)
+            self.first_mark = CenterMark()
+            return True
+
+    front = View("*Front", 7, (0.15, 0.13))
+    top = View("*Top", 4, (0.15, 0.22))
+    right = View("*Right", 4, (0.26, 0.13))
+
+    class Sheet:
+        def GetViews(self):
+            return [front, top, right]
+
+    class Drawing:
+        def __init__(self):
+            self.activated = []
+
+        def GetCurrentSheet(self):
+            return Sheet()
+
+        def ActivateView(self, name):
+            self.activated.append(name)
+            return True
+
+        def ForceRebuild3(self, _top_only):
+            return True
+
+        def GraphicsRedraw2(self):
+            return True
+
+    drawing = Drawing()
+    result = auto_insert_center_marks(drawing, [{"id": "CM1", "view": "Front", "count": 1, "targets": ["holes"]}])
+
+    assert result["status"] == "pass"
+    assert drawing.activated == ["View-*Front"]
+    assert front.calls == [(1, 0, True, True, True, 0.0, 0.0, False, True, 0.0)]
+    assert result["requirements"][0]["after_count"] == 1
+    assert result["requirements"][0]["created_count"] == 1
+
+
+def test_auto_insert_center_marks_rejects_api_success_without_entity_readback():
+    """@brief COM 返回 True 但无中心标记实体时必须失败，避免假成功。"""
+    class View:
+        Name = "Front"
+        Type = 7
+        Position = (0.15, 0.13)
+
+        def GetOrientationName(self):
+            return "*Front"
+
+        def GetBaseView(self):
+            return None
+
+        def GetFirstCenterMark2(self):
+            return None
+
+        def GetCenterMarks(self):
+            return []
+
+        def AutoInsertCenterMarks2(self, *_args):
+            return True
+
+    view = View()
+
+    class Sheet:
+        def GetViews(self):
+            return [view]
+
+    class Drawing:
+        def GetCurrentSheet(self):
+            return Sheet()
+
+        def GetPathName(self):
+            return "C:/cad/saved.slddrw"
+
+    result = auto_insert_center_marks(Drawing(), [{"id": "CM1", "view": "Front", "count": 1, "targets": ["holes"]}])
+
+    assert result["status"] == "failed"
+    assert result["requirements"][0]["api_returned"] is True
+    assert result["requirements"][0]["after_count"] == 0
+    assert result["error_code"] == "DRAWING_CENTER_MARK_INSERT_OR_READBACK_FAILED"
+
+
+def test_auto_insert_center_marks_explains_unsaved_drawing_false_positive():
+    """@brief 未保存工程图出现 True/零实体时应给出可重试的首次保存提示码。"""
+    class View:
+        Name = "Front"
+        Type = 7
+        Position = (0.15, 0.13)
+
+        def GetOrientationName(self):
+            return "*Front"
+
+        def GetBaseView(self):
+            return None
+
+        def GetFirstCenterMark2(self):
+            return None
+
+        def GetCenterMarks(self):
+            return []
+
+        def AutoInsertCenterMarks2(self, *_args):
+            return True
+
+    class Sheet:
+        def GetViews(self):
+            return [View()]
+
+    class Drawing:
+        def GetCurrentSheet(self):
+            return Sheet()
+
+        def GetPathName(self):
+            return ""
+
+    result = auto_insert_center_marks(Drawing(), [{"id": "CM1", "view": "Front", "count": 1, "targets": ["holes"]}])
+
+    assert result["status"] == "failed"
+    assert result["retryable"] is True
+    assert result["error_code"] == "DRAWING_CENTER_MARK_DRAWING_SAVE_REQUIRED"
 
 
 def test_inspect_drawing_structure_blocks_empty_drawing():
@@ -322,6 +713,120 @@ def test_create_adaptive_views_falls_back_to_native_third_angle_and_maps_orienta
     for view in drawing.views:
         assert view.Position == expected_centers[view.GetOrientationName()]
         assert view.ScaleRatio == tuple(layout["scale_ratio"])
+
+
+def test_create_adaptive_first_angle_views_repositions_native_third_angle_fallback():
+    """@brief SW 缺少第一角 API 时仍按第一角 DrawingSpec 回读并重排三视图。"""
+
+    class View:
+        def __init__(self, orientation):
+            self.orientation = orientation
+            self.Name = f"Drawing View {orientation}"
+            self.ScaleRatio = None
+            self.Position = None
+            self.UseParentScale = True
+
+        def GetOrientationName(self):
+            return self.orientation
+
+    class Sheet:
+        def __init__(self, drawing):
+            self.drawing = drawing
+
+        def GetViews(self):
+            return self.drawing.views
+
+    class Drawing:
+        def __init__(self):
+            self.views = []
+
+        def CreateDrawViewFromModelView3(self, *_args):
+            return None
+
+        def Create3rdAngleViews2(self, _path):
+            self.views = [View("*Front"), View("*Top"), View("*Right")]
+            return True
+
+        def GetCurrentSheet(self):
+            return Sheet(self)
+
+        def ForceRebuild3(self, _top_only):
+            return True
+
+    drawing = Drawing()
+    layout = plan_standard_view_layout((0.1, 0.05, 0.03), projection="first_angle")
+    result = create_adaptive_standard_views(drawing, "part.sldprt", layout)
+
+    by_orientation = {view.orientation: view for view in drawing.views}
+    assert result["status"] == "pass"
+    assert result["backend"] == "native_first_angle_via_3rd_angle"
+    assert by_orientation["*Top"].Position[1] < by_orientation["*Front"].Position[1]
+    assert by_orientation["*Right"].Position[0] < by_orientation["*Front"].Position[0]
+    assert result["view_count"] == 3
+    expected_centers = {item["name"]: tuple(item["center"]) for item in layout["views"]}
+    for view in drawing.views:
+        assert view.Position == expected_centers[view.GetOrientationName()]
+        assert view.ScaleRatio == tuple(layout["scale_ratio"])
+
+
+def test_create_adaptive_views_refines_spacing_from_native_outlines():
+    """@brief 实际投影包围盒大于模型估算时，必须二次排布并消除视图重叠。"""
+
+    class View:
+        def __init__(self, orientation, width, height):
+            self.orientation = orientation
+            self.Name = f"Drawing View {orientation}"
+            self.width = width
+            self.height = height
+            self.Position = (0.0, 0.0)
+            self.ScaleRatio = None
+            self.UseParentScale = True
+
+        def GetOrientationName(self):
+            return self.orientation
+
+        def GetOutline(self):
+            x, y = self.Position
+            return (x - self.width / 2, y - self.height / 2, x + self.width / 2, y + self.height / 2)
+
+    class Sheet:
+        def __init__(self, drawing):
+            self.drawing = drawing
+
+        def GetViews(self):
+            return self.drawing.views
+
+    class Drawing:
+        def __init__(self):
+            self.views = []
+
+        def CreateDrawViewFromModelView3(self, *_args):
+            return None
+
+        def Create3rdAngleViews2(self, _path):
+            self.views = [
+                View("*Front", 0.100, 0.050),
+                View("*Top", 0.100, 0.120),
+                View("*Right", 0.120, 0.050),
+            ]
+            return True
+
+        def GetCurrentSheet(self):
+            return Sheet(self)
+
+        def ForceRebuild3(self, _top_only):
+            return True
+
+    drawing = Drawing()
+    layout = plan_standard_view_layout((0.1, 0.05, 0.03), projection="first_angle")
+    result = create_adaptive_standard_views(drawing, "part.sldprt", layout)
+
+    by_orientation = {view.orientation: view for view in drawing.views}
+    front = by_orientation["*Front"].GetOutline()
+    right = by_orientation["*Right"].GetOutline()
+    assert result["status"] == "pass"
+    assert result["layout_refinement"]["adjustments"]
+    assert right[2] + layout["gap_m"] <= front[0] + 1e-9
 
 
 def test_add_a3_sheet_blocks_without_gbt_template(tmp_path):
@@ -549,3 +1054,94 @@ def test_review_estimated_overlap_is_risk_not_confirmed_collision():
     assert finding["confirmed_collision"] is False
     assert result["error_code"] == "DRAWING_LAYOUT_ESTIMATED_COLLISION_RISK"
     assert next(item for item in result["checks"] if item["id"] == "drawing-layout-collisions")["status"] == "warning"
+
+
+def test_review_drawing_layout_checks_note_collisions_and_missing_boxes():
+    """@brief 注释侵入视图或缺少边界时不能被当作无碰撞。"""
+    result = review_drawing_layout({
+        "views": [
+            {"name": "Front", "sheet": "Sheet1", "box": {"left": 0.10, "bottom": 0.10, "right": 0.20, "top": 0.20}},
+            {"name": "Top", "sheet": "Sheet1", "box": {"left": 0.10, "bottom": 0.23, "right": 0.20, "top": 0.29}},
+            {"name": "Right", "sheet": "Sheet1", "box": {"left": 0.03, "bottom": 0.10, "right": 0.08, "top": 0.20}},
+        ],
+        "dimensions": [],
+        "notes": [{
+            "sheet": "Sheet1",
+            "text": "Material: ABS",
+            "box": {"left": 0.12, "bottom": 0.12, "right": 0.18, "top": 0.14},
+        }],
+        "title_block": {"box": {"left": 0.23, "bottom": 0.01, "right": 0.40, "top": 0.06}},
+    })
+
+    assert result["status"] == "review_required"
+    assert any(item["code"] == "DRAWING_NOTE_VIEW_INTRUSION" for item in result["findings"])
+
+    missing_box = review_drawing_layout({
+        "views": [
+            {"name": "Front", "box": {"left": 0.10, "bottom": 0.10, "right": 0.20, "top": 0.20}},
+            {"name": "Top", "box": {"left": 0.10, "bottom": 0.23, "right": 0.20, "top": 0.29}},
+            {"name": "Right", "box": {"left": 0.03, "bottom": 0.10, "right": 0.08, "top": 0.20}},
+        ],
+        "dimensions": [],
+        "notes": [{"text": "Material: ABS", "position_m": [0.02, 0.02, 0.0]}],
+        "title_block": {"box": {"left": 0.23, "bottom": 0.01, "right": 0.40, "top": 0.06}},
+    })
+    assert missing_box["status"] == "review_required"
+    assert missing_box["error_code"] == "DRAWING_LAYOUT_EVIDENCE_INCOMPLETE"
+
+
+def test_blank_section_view_label_is_not_reported_as_user_note_intrusion():
+    """@brief 剖视图自带空标签框与所属视图相交不是技术注释侵入。"""
+    result = review_drawing_layout({
+        "views": [
+            {"name": "Front", "type": 7, "sheet": "Sheet1", "box": {"left": 0.02, "bottom": 0.10, "right": 0.10, "top": 0.18}},
+            {"name": "Top", "type": 4, "sheet": "Sheet1", "box": {"left": 0.02, "bottom": 0.20, "right": 0.10, "top": 0.27}},
+            {"name": "Right", "type": 4, "sheet": "Sheet1", "box": {"left": 0.12, "bottom": 0.10, "right": 0.19, "top": 0.18}},
+            {"name": "剖面视图 A-A", "type": 2, "sheet": "Sheet1", "box": {"left": 0.24, "bottom": 0.10, "right": 0.32, "top": 0.18}},
+        ],
+        "dimensions": [],
+        "notes": [{
+            "sheet": "Sheet1",
+            "text": "",
+            "box": {"left": 0.2636, "bottom": 0.175, "right": 0.2763, "top": 0.181},
+        }],
+        "title_block": {"box": {"left": 0.23, "bottom": 0.01, "right": 0.40, "top": 0.06}},
+    })
+
+    assert not any(item["code"] == "DRAWING_NOTE_VIEW_INTRUSION" for item in result["findings"])
+
+
+def test_inspection_marks_blank_section_owned_note_as_view_label():
+    """@brief 新生成的结构证据应显式记录标签所属视图及标签类型。"""
+    class Note:
+        def GetText(self):
+            return ""
+
+        def GetExtent(self):
+            return (0.24, 0.095, 0.0, 0.26, 0.102, 0.0)
+
+        def GetAnnotation(self):
+            return self
+
+        def GetPosition(self):
+            return (0.25, 0.10, 0.0)
+
+    class SectionView(FakeView):
+        Name = "剖面视图 A-A"
+        Type = 2
+
+        def GetNotes(self):
+            return [Note()]
+
+    class Sheet(FakeSheet):
+        def GetViews(self):
+            return [SectionView()]
+
+    class Drawing(FakeDrawing):
+        def GetSheet(self, _name):
+            return Sheet()
+
+    result = inspect_drawing_structure(Drawing())
+
+    assert result["notes"][0]["note_kind"] == "view_label"
+    assert result["notes"][0]["owner_view"] == "剖面视图 A-A"

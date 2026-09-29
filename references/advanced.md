@@ -46,33 +46,40 @@ names = props.GetNames()
 ### 配置管理
 
 ```python
-# 获取所有配置名称
-config_names = model.GetConfigurationNames()
-
-# 激活配置
-model.ShowConfiguration2(configName)
-
-# 获取配置对象
-config = model.GetConfigurationByName(configName)
-
-# 添加新配置
-config_mgr = model.ConfigurationManager
-new_config = config_mgr.AddConfiguration2(
-    "NewConfig",    # 名称
-    "描述",          # 描述
-    "",             # 替代名称
-    0,              # 选项
-    "",             # 父配置
-    "",             # 描述2
-    True            # 使用所有参数
+from sw_document_data import (
+    activate_configuration,
+    create_configuration,
+    inspect_configurations,
+    update_dimension_mm,
 )
 
-# 修改配置中的尺寸
-model.ShowConfiguration2("Config1")
-dim = model.Parameter("D1@Boss-Extrude1")
-dim.SystemValue = 0.05  # 50mm（单位: 米）
-model.EditRebuild3()
+# 使用官方 AddConfiguration3 创建并激活；默认同名配置幂等复用。
+created = create_configuration(
+    model,
+    "加工",
+    comment="CNC 工况",
+    alternate_name="MACHINED",
+)
+
+# 使用官方 ShowConfiguration2，并以活动配置名回读而非单独 COM 返回值判定。
+activated = activate_configuration(model, "加工")
+
+# 用显式 VT_ARRAY|VT_BSTR 写入指定配置，API 内部单位自动换算为米。
+dimension = update_dimension_mm(
+    model,
+    "D1@Boss-Extrude1",
+    50.0,
+    configuration_mode="specific",
+    configuration_names=["加工"],
+)
+
+evidence = inspect_configurations(model)
 ```
+
+SW2026 真机已验证配置创建、切换、配置级尺寸/属性以及保存重开回读。`AddConfiguration3`
+会自动激活新配置，因此重复调用 `ShowConfiguration2` 可能返回 `False`；执行器会记录原始
+返回值，但以 `ConfigurationManager.ActiveConfiguration.Name` 回读和重建结果作为成功证据。
+设计表、派生配置、显示状态和大规模抑制矩阵仍是 `pilot` 范围外能力。
 
 ### 设计表
 
@@ -92,43 +99,36 @@ model.InsertFamilyTableEdit()
 ### 基本操作
 
 ```python
-# 钣金相关特征通过 FeatureManager 创建
-# 1. 基体法兰
-feature_mgr.InsertSheetMetalBaseFlange2(
-    Thickness,    # float: 板厚（米）
-    BendRadius,   # float: 折弯半径（米）
-    ...
+from sw_sheet_metal import BaseFlangeSpec, create_base_flange
+
+# 先创建并退出开放或闭合草图，再使用现代 FeatureData API。
+feature = create_base_flange(
+    model,
+    sketch_name,
+    BaseFlangeSpec(
+        thickness=0.002,
+        bend_radius=0.0025,
+        depth=0.100,
+        k_factor=0.42,
+    ),
 )
-
-# 2. 边线法兰
-feature_mgr.InsertSheetMetalEdgeFlange2(...)
-
-# 3. 斜接法兰
-feature_mgr.InsertSheetMetalMiterFlange(...)
-
-# 4. 展开
-feature_mgr.InsertSheetMetalFlatPattern2()
-
-# 5. 折叠
-feature_mgr.InsertSheetMetalFold()
 ```
+
+该封装使用 `CreateDefinition(swFmBaseFlange)`、`IBaseFlangeFeatureData.Initialize`
+和 `CreateFeature`，不会猜测已废弃长参数接口。SW2026 SP01.1 已验证开放 U 型轮廓、
+两道真实折弯及保存重开；边线法兰、斜接法兰和放样折弯仍按 `pilot` 门禁处理。
 
 ### 展开图导出
 
 ```python
-# 导出展开图为 DXF
-model.ExportToDWG2(
-    dxfPath,           # str: 输出路径
-    modelPath,         # str: 模型路径（或空字符串）
-    1,                 # int: 导出类型（1=展开图）
-    True,              # bool: 显示外轮廓
-    True,              # bool: 包含弯曲线
-    False,             # bool: 草图实体
-    False,             # bool: 隐藏边线
-    0,                 # int: 弯曲注释
-    None               # variant: 导出数据
-)
+from sw_export import export_flat_pattern_dxf
+
+# 零件必须先保存；选项位掩码默认为“展开几何(1) + 折弯线(4)”。
+export_flat_pattern_dxf(model, dxfPath, include_bend_lines=True)
 ```
+
+`ExportToDWG2` 的第五个参数是 12 个双精度数值组成的对齐数组，第八个参数才是
+钣金选项位掩码；不要把多个布尔值误当作“轮廓/折弯线/草图/隐藏边线”。
 
 ### 钣金参数
 
@@ -145,40 +145,48 @@ bend_radius = sheet_metal_data.BendRadius # 折弯半径
 ### 切割清单
 
 ```python
-def get_cut_list(model):
-    """遍历焊件切割清单"""
-    feat = model.FirstFeature()
-    items = []
-    while feat:
-        if feat.GetTypeName2() == "CutListFolder":
-            props = feat.CustomPropertyManager
-            # 读取属性
-            qty_val = ""
-            qty_resolved = ""
-            props.Get6("QUANTITY", False, qty_val, qty_resolved, False, False)
+from sw_weldment import (
+    create_structural_member,
+    ensure_cut_list,
+    export_cut_list_csv,
+    set_cut_list_properties,
+    weldment_evidence,
+)
 
-            desc_val = ""
-            desc_resolved = ""
-            props.Get6("DESCRIPTION", False, desc_val, desc_resolved, False, False)
-
-            items.append({
-                "name": feat.Name,
-                "quantity": qty_resolved,
-                "description": desc_resolved
-            })
-        feat = feat.GetNextFeature()
-    return items
+member = create_structural_member(
+    model,
+    profile_path,
+    [sketch_segments],
+    apply_corner_treatment=True,
+)
+ensure_cut_list(model)
+set_cut_list_properties(model, {"PROFILE_DESIGNATION": "HSS1x1x16ga"})
+evidence = weldment_evidence(model)
+export_cut_list_csv(evidence, csv_path)
 ```
+
+SW2026 的 `InsertWeldmentCutList2` 在 Python IDispatch 下可能被投影成值为
+`None` 的伪属性；封装会按本机类型库确认的 DISPID 174 以
+`DISPATCH_METHOD` 调用。矩形框架回归会按实体包围盒最长边分组，生成两个
+真实 `CutListFolder`，而不是把不同长度构件错误合并。
 
 ### 结构构件
 
 ```python
-# 插入结构构件（焊件型材）
-feature_mgr.InsertStructuralWeldment5(
-    ProfilePath,   # str: 型材文件路径（.sldlfp）
-    ...
+from sw_weldment import create_weldment_profile
+
+# 型材文档中先完成并退出闭合轮廓草图；可写入型材/BOM 来源属性。
+profile = create_weldment_profile(
+    profile_model,
+    profile_sketch,
+    profile_path,
+    properties={"DESCRIPTION": "HSS1x1x16ga", "MATERIAL": "steel_a500b"},
 )
 ```
+
+`create_structural_member()` 内部使用 `CreateStructuralMemberGroup` 与最新
+`InsertStructuralWeldment5`，路径段和组均作为 `VT_ARRAY | VT_DISPATCH`
+安全数组封送；调用者不需要猜长参数或依赖当前选择集。
 
 ## 曲面建模
 

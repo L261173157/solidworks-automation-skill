@@ -23,11 +23,15 @@ subskills:
   - name: solidworks-fillet-chamfer-cnc
     status: stable
     path: subskills/solidworks-fillet-chamfer-cnc
-    summary: CNC 安装座、连接块、支架、多圆角/倒角、孔槽和减重口袋。
+    summary: CNC 安装座、参数/碰撞预检、语义选边、有界尺寸降级、孔槽和圆角口袋。
   - name: solidworks-threaded-holes
     status: stable
     path: subskills/solidworks-threaded-holes
     summary: M3-M12 螺纹孔、攻丝底孔、孔口倒角、螺纹属性和 STEP 输出。
+  - name: solidworks-engineering-drawing
+    status: pilot
+    path: subskills/solidworks-engineering-drawing
+    summary: GB/T 第一角零件图/装配图、尺寸链、孔表、BOM、PDF/BMP 证据和制造交付审视。
   - name: autocad-automation
     status: stable
     path: subskills/autocad-automation

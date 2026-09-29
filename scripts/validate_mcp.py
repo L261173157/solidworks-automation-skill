@@ -18,11 +18,13 @@ ROOT = Path(__file__).resolve().parents[1]
 SERVER_PATH = ROOT / "mcp-server" / "server.py"
 
 REQUIRED_TOOLS = {
+    "cadstudio_resolve_backend",
     "cadstudio_write_open_format",
     "cadstudio_build_dxf_preview_scene",
     "cadstudio_check_dfm",
     "cadstudio_check_routing",
     "cadstudio_routing_preflight",
+    "solidworks_addin_host_status",
     "cadstudio_fea_preflight",
     "cadstudio_prepare_fea",
     "cadstudio_run_fea",
@@ -44,6 +46,9 @@ REQUIRED_TOOLS = {
     "solidworks_add_concentric_mate",
     "solidworks_set_appearance",
     "solidworks_export_active",
+    "solidworks_inspect_configurations",
+    "solidworks_create_configuration",
+    "solidworks_activate_configuration",
     "solidworks_update_dimension",
     "solidworks_set_custom_properties",
     "solidworks_batch_export_files",
@@ -57,6 +62,9 @@ REQUIRED_TOOLS = {
     "solidworks_validate_motion_study",
     "solidworks_plan_manufacturing_drawing",
     "solidworks_create_manufacturing_drawing",
+    "solidworks_generate_drawing",
+    "solidworks_review_drawing",
+    "solidworks_inspect_drawing",
 }
 
 

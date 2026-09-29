@@ -4,20 +4,29 @@
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![SolidWorks](https://img.shields.io/badge/SolidWorks-2024--2026-red.svg)](https://www.solidworks.com/)
 
-CAD Studio 桌面端与 Skill/CLI/MCP 是平级入口：既可通过 Python COM 控制本机 SolidWorks/AutoCAD，也可在没有 CAD 软件时使用无头后端写入开放格式。实际可执行范围以根目录 `capabilities.yaml` 为唯一真源；未验证能力不会被包装成已完成的无人值守交付。
+CAD Studio 桌面端与 Skill/CLI/MCP 是平级入口：这个仓库同时可以作为 Skill 包和 MCP Server 使用。Skill 适合导入支持 skills 的客户端，MCP 适合做本地工具连接；两者共用同一套能力和脚本。实际可执行范围以根目录 `capabilities.yaml` 为唯一真源；未验证能力不会被包装成已完成的无人值守交付。
 
-> 可靠性边界：当前真机基线为 SolidWorks 2024、SolidWorks 2026 SP01.1 和 AutoCAD 2024。SolidWorks 2026 仅对能力清单中列出 2026 的能力视为已验证；SolidWorks 2025 及其余未回归能力仍是兼容性目标。配置/设计表、钣金和焊件仍为参考或兼容目标；Simulation/FEA、Routing、复杂曲面和模具已进入受控 `pilot` 门禁，但不能冒充原生完整交付。
+> 可靠性边界：当前真机基线为 SolidWorks 2024、SolidWorks 2026 SP01.1 和 AutoCAD 2024。SolidWorks 2026 仅对能力清单中列出 2026 的能力视为已验证；SolidWorks 2025 及其余未回归能力仍是兼容性目标。配置族、钣金 U 型轮廓法兰/展开 DXF，以及 HSS 矩形焊接框架/切割清单已进入 `pilot`；设计表与复杂钣金/焊件仍是兼容目标。C# Add-in 宿主已在 SW2026 SP1.1 完成进程内 callback、应用事件、CommandGroup、TaskPane、PropertyManagerPage 和 JSON 诊断回归；正式部署必须使用 64 位 RegAsm `/codebase /tlb`。Simulation/FEA、Routing、复杂曲面和模具也处于受控 `pilot` 门禁，不能冒充原生完整交付。
 
 ## 下载与首次启动
 
-两个入口互相独立，按使用习惯任选其一：
+三种入口互相独立，按使用习惯任选其一：
 
 | 入口 | 适合用户 | 下载/安装 |
 |---|---|---|
-| Skill / CLI / MCP | 已在使用 Codex、Claude Code、Gemini CLI、OpenCode 或 OpenClaw | `npx github:wzyn20051216/solidworks-automation-skill`，也可手动克隆本仓库 |
+| Skill | 已在使用支持 skill 导入的客户端 | `npx github:wzyn20051216/solidworks-automation-skill`，或 `claude skill add https://github.com/wzyn20051216/solidworks-automation-skill` |
+| MCP | 已在使用 Codex、Claude Code、Cursor、Windsurf 或其他 MCP 客户端 | 推荐通过 [Smithery](https://smithery.ai/servers/wzyn20051216/solidworks-automation-skill) 安装：`smithery mcp add wzyn20051216/solidworks-automation-skill --client codex --config '{}'` |
 | CAD Studio 桌面版 | 希望用图形界面管理项目、对话、任务、预览和交付 | 从 [GitHub Releases](https://github.com/wzyn20051216/solidworks-automation-skill/releases) 下载 Windows 安装包或便携 ZIP |
 
-安装 Skill 后，进入 Skill 目录并执行一次诊断：
+如果本机还没有 Smithery CLI，先安装一次：
+
+```powershell
+npm install -g @smithery/cli
+```
+
+已能运行 `smithery --version` 的用户可跳过这一步。其他客户端可把命令中的 `--client codex` 替换为 `--client claude`、`--client cursor`、`--client windsurf` 等 Smithery 支持的目标。
+
+Smithery 安装后，可在 MCP 客户端调用 `solidworks_health_check` 检查本机环境。使用 `npx` 或手动克隆的用户，也可以进入 Skill 目录执行诊断：
 
 ```powershell
 python scripts/cad_doctor.py
@@ -70,24 +79,49 @@ python scripts/cad_studio.py create-ocp-surface --input .\smooth-loft.json --out
 
 ## 中文
 
+### 🎞️ 真机案例：复杂测试件工程图
+
+<p align="center">
+  <img src="assets/showcase/solidworks-engineering-drawing-demo.gif" alt="代码驱动 SolidWorks 生成复杂测试件与 GB/T 工程图" width="900">
+</p>
+
+这个案例不是概念动画：`solidworks-engineering-drawing` 在 SolidWorks 2026 SP01.1 中读取 NIST 公共领域复杂测试件，核对 `141.421 × 141.421 × 17 mm` 包围盒，并生成原生 `SLDPRT + SLDDRW + PDF + evidence/review JSON`。工程图包含三视图、等轴测图、A-A 剖视和 10 个必需尺寸；当前工程图定向测试为 70 项通过，实验产物的 PDF 可提取文字边界为 0 重叠。
+
+> 工程图能力当前仍为 `pilot`。自动检查可以发现缺失输出和明显碰撞，但图框、尺寸链、孔表及制造语义仍要求工程师做最终目视复核。测试件来源为 NIST 公共领域资料，并非仓库自创的官方基准模型。
+
+#### 更多已验证案例
+
+| 案例 | 对应能力 | 已有证据 | 当前等级 |
+|---|---|---|---|
+| [NIST 复杂测试件工程图](subskills/solidworks-engineering-drawing/README.md) | GB/T 第一角工程图、尺寸链、PDF 边界审查 | SolidWorks 2026 原生零件/工程图/PDF、5 个视图、10 个必需尺寸、A-A 剖视 | `pilot`，人工复核必需 |
+| [M6×1 真实螺纹孔](subskills/solidworks-threaded-holes/README.md) | 盲孔/贯穿孔、Metric Tap Thread、孔口倒角 | 重建后回读真实 Thread；SLDPRT/STEP/四视图；review `pass/100` | `verified` |
+| [标准渐开线直齿轮](references/gears.md) | 模数/齿数/压力角驱动的外啮合直齿轮实体，与 Gear Mate 分路 | SW2026 SP1.1：m2/z24/齿宽10/孔10，SLDPRT/STEP/四视图/重开/B-Rep 回读 `52×52×10 mm` | `pilot`，人工复核必需 |
+| [CNC 多圆角/倒角安装座](subskills/solidworks-fillet-chamfer-cnc/README.md) | 参数/碰撞预检、语义选边、三控制点可变半径、face/full-round/setback、G2 曲面组合、宽度-宽度倒角、沉孔、长圆槽、CNC 友好口袋 | SW2026 SP1.1：六项高级路径完成 SLDPRT/STEP/重开/FeatureData 读回；开源角支架在固定斜边完成 C0.2/C0.4 倒角并保持处理后拓扑；保持线仍明确 blocked | `stable` 子技能 |
+| [桌面迷你风扇运动装配](examples/08_mini_fan_motion_assembly.py) | 多零件建模、装配 Mate、旋转马达 Motion Study | 4 个零件、原生装配体、Mate/Motion 验证脚本 | `pilot`，人工复核必需 |
+
 ### ✨ 特性
 
 - 🔧 **零件建模** - 草图绘制、拉伸、旋转、倒角、圆角、阵列等
+- ⚙️ **标准直齿轮（试点）** - 真实渐开线采样齿廓、中心孔、齿宽、根切预警与 SolidWorks 2026 交付复核；实体建模与 Gear Mate 严格分路
+- 🧭 **多语言后端路由** - 按原子操作在 Python、C# PIA/Add-in、原生 C++、SWBasic、OCCT 和外部求解器之间选择，区分 Automation 等价语义与精确原生接口
+- 🧩 **C# Add-in 宿主（SW2026 已验证）** - `net48/x64` 强名称程序集覆盖应用事件、三命令 CommandGroup、TaskPane、完整 PMP Handler 与 JSON 诊断；Machine `/codebase /tlb` 注册和真机 Probe 见 [`references/solidworks-addin-host.md`](references/solidworks-addin-host.md)
 - 🧱 **无 CAD 开放格式后端** - OCCT/OCP 隔离进程真实写入 STEP、IGES、BREP、STL、OBJ、GLB，二维后端写入 DXF、SVG、PDF、PNG；复杂特征按能力门禁阻断
 - 🧠 **VibeCAD 参数化规划** - 将自然语言需求转换为设计计划、制造规则检查、SolidWorks API 执行摘要和审查门禁
 - 🧵 **螺纹孔建模** - 攻丝底孔、M3/M4/M5/M6/M8 盲孔/通孔、孔口倒角、装饰螺纹与可见螺旋线兜底
 - 🧾 **AutoCAD / DWG 子技能** - DXF 无头预览与结构审查可用；AutoCAD 原生 DWG 绘图仍受本机 ActiveX 代理稳定性门禁，详见能力清单
+- 🔄 **签名自动更新** - Windows 桌面版启动后静默检查 GitHub Release，发现新版本后由用户确认下载和安装；失败时保留手动下载入口
 - 🔩 **装配体操作** - 添加组件、配合关系、干涉检查、爆炸视图
 - 📐 **工程图出图** - 三视图、剖视图、尺寸标注、BOM 表
+- 🧾 **工程图专业子技能** - `solidworks-engineering-drawing` 独立负责 GB/T 第一角工程图、尺寸链、孔表、BOM、PDF/BMP 证据和制造交付审视，可由根技能或任意相关子技能按需连接
 - 💾 **文件导出** - STEP、STL、IGES、PDF、DXF/DWG、Parasolid；SW2026 SP01.1 基础装配已通过原生 Pack and Go 连续回归，复杂引用缺失时仍按门禁生成带哈希清单的 `pilot` 暂存包
 - 🧩 **网格参考导入** - 将公开 GLB/OBJ/STL 外观参考模型缩放、转换并导入为 SolidWorks 参考零件
 - 🎨 **外观材质** - 文档、特征、组件级颜色设置，支持装配体分色建模
 - 🎬 **Motion Study** - 自动创建运动算例、匀速旋转马达并计算/播放动画
 - 🔌 **MCP Server** - 将 SolidWorks COM 自动化封装成 Codex / Claude / Cursor 可调用的本地 MCP 工具，覆盖基础建模、装配、Mate、外观、导出、审查和旋转马达
-- 🔨 **钣金设计（参考）** - 文档与 API 路由已整理，当前不承诺无人值守交付
-- ⚡ **焊件设计（参考）** - 结构构件与切割清单尚无稳定回归执行器
+- 🔨 **钣金设计（试点）** - SW2026 已验证开放 U 型轮廓双折弯、板厚/半径/K 因子重开回读及含折弯线 DXF；复杂钣金仍需人工复核
+- ⚡ **焊件设计（试点）** - SW2026 已验证自定义 `.sldlfp`、四根 HSS 斜接框架、按长度/数量分组的原生切割清单及 CSV；回归数据来自 MIT 许可的 [Coremark Weldment Profiles](https://github.com/someoneskater/Coremark-Weldment-Profiles)
 - 📊 **FEA 仿真（试点）** - CalculiX 2.23 已真实求解线性静力、NLGEOM、受限塑性和双实体面接触样件，可解析最终步穿透/压力/滑移并执行线性或非线性网格收敛序列；结果统一保留人工复核，不等于安全认证
-- 📝 **自定义属性** - 文件属性读写可用；配置/设计表按能力清单限制使用
+- 📝 **配置与属性** - SW2026 已真机验证三配置创建/切换、配置尺寸/属性和保存重开；设计表仍按能力清单限制使用
 - 🏭 **DFM 制造复核（试点）** - 机加工、钣金、激光切割和 3D 打印的结构化风险检查，支持供应商 profile 与 B-Rep 证据绑定；规则通过仍需人工确认
 - 🧭 **Routing 中性复核（试点）** - 校验端点、分段、长度、弯曲半径、碰撞/间隙、支撑间距和 Routing BOM；未发现 Routing 加载项/许可证时原生写入保持 `blocked`
 - 🧰 **复杂曲面/模具（试点）** - OCP 可真实生成并重开受限直纹/平滑 Loft、直线/圆弧 Sweep、闭壳 Knit 和开放面 Thicken；G1/G2 与局部曲率半径只代表离散采样证据，不替代全局无自交、Class-A 或模具设计
@@ -103,6 +137,7 @@ python scripts/cad_studio.py create-ocp-surface --input .\smooth-loft.json --out
 - **无头写入**: 不要求安装 SolidWorks/AutoCAD；DXF 需要 `ezdxf`
 - **OCCT 几何后端**: 安装 `requirements-occt.txt` 后启用 STEP/IGES/BREP/GLB 和布尔孔切除
 - **开放 FEA**: CalculiX 可作为外部 GPL 求解器放在 D/E 盘；程序不会把其二进制打包进 MIT 发布物
+- **工程图最终审查依赖**: `PyMuPDF`，用于读取 SolidWorks 导出 PDF 的实际尺寸文字边界；已包含在 `requirements.txt`
 - **网格转换可选依赖**: `trimesh`、`pygltflib`、`numpy`、`Pillow`
 
 > 运行前可执行 `python scripts/sw_preflight.py`。如果缺少 `comtypes` / `win32com`，脚本会先询问是否授权 AI 自动配置本地环境；如果未检测到 SolidWorks，会直接停止并提示先手动安装 SolidWorks。
@@ -115,27 +150,42 @@ python scripts/cad_studio.py create-ocp-surface --input .\smooth-loft.json --out
 | pywin32 / comtypes | SolidWorks、AutoCAD COM 原生自动化 | `python -m pip install "pywin32>=305" "comtypes>=1.2.0"` |
 | ezdxf | DXF 无头读写、图层和实体检查 | `python -m pip install "ezdxf>=1.3,<2"` |
 | OCP / OCCT | STEP、IGES、BREP、GLB 无头几何写入 | `python -m pip install -r requirements-occt.txt` |
-| PyMuPDF | PDF 预览与矢量文字复核 | `python -m pip install -r requirements-pdf.txt` |
+| PyMuPDF | 工程图最终 PDF 尺寸文字边界审查，工程图交付必需 | 已随 `python -m pip install -r requirements.txt` 安装 |
 | CalculiX | 开放 FEA 求解 | [CalculiX 官方站](https://www.calculix.de/)；解压到 D/E 盘后设置 `CADSTUDIO_CALCULIX_EXE` 指向 `ccx.exe` |
 | Agent CLI | AI 对话与任务执行，安装任意一个即可 | [Codex](https://developers.openai.com/codex/cli/) / [Claude Code](https://docs.anthropic.com/en/docs/claude-code/overview) / [Gemini CLI](https://github.com/google-gemini/gemini-cli) / [OpenCode](https://opencode.ai/) |
 | SolidWorks | `SLDPRT/SLDASM/SLDDRW` 原生格式 | [SolidWorks 官方站](https://www.solidworks.com/)；需要合法安装与可用许可 |
 | AutoCAD | 原生 DWG 后端 | [AutoCAD 官方站](https://www.autodesk.com/products/autocad/overview)；需要合法安装与可用许可 |
 
-安装依赖后重新运行 `python scripts/cad_studio.py doctor`。不要为了补齐可选环境一次性安装全部依赖；只安装当前任务需要的后端即可。
+安装依赖后重新运行 `python scripts/cad_studio.py doctor`。不要为了补齐可选环境一次性安装全部依赖；工程图交付除外，它要求 `requirements.txt` 中的 PyMuPDF。
 
 ### 🚀 快速开始
 
-#### 方式一：npx 一键安装（推荐）
+#### 方式一：Skill 安装（推荐给支持 skill 的客户端）
 
 ```bash
 npx github:wzyn20051216/solidworks-automation-skill
 ```
 
-自动下载并安装到 Claude/Codex/OpenClaw 等已检测到的 skills 目录，并自动尝试把 SolidWorks MCP 注册到 Codex、Claude Code、Claude Desktop、Cursor、Windsurf 等本地 AI 客户端。
+如果客户端支持直接导入 skill，也可以使用：
+
+```bash
+claude skill add https://github.com/wzyn20051216/solidworks-automation-skill
+```
+
+#### 方式二：Smithery 安装 MCP
+
+```powershell
+npm install -g @smithery/cli
+smithery mcp add wzyn20051216/solidworks-automation-skill --client codex --config '{}'
+```
+
+如果已经安装 Smithery CLI，第一行可以跳过。`wzyn20051216/solidworks-automation-skill` 是 Smithery 上的本地 `stdio` MCP 包；不要用 `server.smithery.ai/...` URL 安装这个包。
+
+Codex 以外的客户端可把 `--client codex` 改为 Smithery 支持的目标，例如 `claude`、`cursor`、`vscode`、`windsurf` 或 `opencode`。
 
 安装后如果客户端已经打开，建议重启对应客户端；部分客户端首次加载本地 MCP 时可能还需要在界面中确认信任。
 
-#### 方式二：OpenClaw / 龙虾 使用
+#### 方式三：OpenClaw / 龙虾 使用
 
 OpenClaw 兼容本 skill 的 `SKILL.md + scripts/ + references/` 目录结构。推荐把技能放在以下任一目录：
 
@@ -154,12 +204,6 @@ OpenClaw 侧的接入约定、执行模板与排障说明见：
 
 ```text
 references/openclaw.md
-```
-
-#### 方式三：Claude CLI 安装
-
-```bash
-claude skill add https://github.com/wzyn20051216/solidworks-automation-skill
 ```
 
 #### 方式四：手动克隆
@@ -252,6 +296,7 @@ solidworks-automation-skill/
 │   ├── solidworks-vibecad/              # 自然语言 -> 参数化设计计划
 │   ├── solidworks-fillet-chamfer-cnc/   # CNC 多圆角/倒角机加工件
 │   ├── solidworks-threaded-holes/       # 螺纹孔、攻丝底孔和孔口倒角
+│   ├── solidworks-engineering-drawing/  # GB/T 工程图生成与制造交付审视
 │   └── autocad-automation/              # AutoCAD DWG/DXF 二维绘图和线稿矢量化
 ├── docs/                # 产品化、市场调研和技能地图
 │   ├── market-research-2026.md          # 市场调研与产品定位
@@ -295,15 +340,25 @@ npm run desktop:bundle
 | 子技能 | 状态 | 用途 |
 |---|---|---|
 | [`solidworks-vibecad`](subskills/solidworks-vibecad/README.md) | experimental | 自然语言需求 -> 参数化设计计划、制造规则检查、执行摘要、审查门禁 |
-| [`solidworks-fillet-chamfer-cnc`](subskills/solidworks-fillet-chamfer-cnc/README.md) | stable | CNC 安装座、连接块、支架、多圆角/倒角、孔槽和减重口袋 |
-| [`solidworks-threaded-holes`](subskills/solidworks-threaded-holes/README.md) | stable | M3-M12 螺纹孔、攻丝底孔、孔口倒角、螺纹属性和 STEP 输出 |
+| [`solidworks-fillet-chamfer-cnc`](subskills/solidworks-fillet-chamfer-cnc/README.md) | stable | CNC 安装座、语义选边、有界降级、三控制点可变半径、face/full-round/setback、G2 曲面组合、宽度-宽度倒角及开源复杂件回归 |
+| [`solidworks-threaded-holes`](subskills/solidworks-threaded-holes/README.md) | stable | ISO 公制内螺纹、Metric Tap 真实 Thread、贯穿/盲孔语义、参数校验和重建后证据 |
+| [`solidworks-engineering-drawing`](subskills/solidworks-engineering-drawing/README.md) | pilot | GB/T 第一角零件/装配工程图、尺寸链、孔表、BOM、PDF/BMP 证据和制造交付审视 |
 | [`autocad-automation`](subskills/autocad-automation/README.md) | verified / pilot / blocked | DXF 无头预览与结构审查；AutoCAD 2024 .NET 白名单后端须经最近连续三次证据复验后为 verified；COM 原生写入仍受门禁 |
 
 更多路由说明见 [`SUBSKILLS.md`](SUBSKILLS.md)。
 
 ### 🔌 MCP Server
 
-本仓库包含一个本地 `stdio` MCP Server，可让 Codex / Claude Code / Claude Desktop / Cursor / Windsurf 等 MCP 客户端通过工具调用 SolidWorks：
+本仓库包含一个本地 `stdio` MCP Server，也可以作为 Skill 导入到支持 skill 的客户端。MCP 侧推荐直接使用 Smithery 分发包：
+
+```powershell
+npm install -g @smithery/cli
+smithery mcp add wzyn20051216/solidworks-automation-skill --client codex --config '{}'
+```
+
+如果已经安装 Smithery CLI，可跳过 `npm install -g @smithery/cli`。这个包是本地 `stdio` MCP，安装时使用 qualified name `wzyn20051216/solidworks-automation-skill`。
+
+开发调试时也可以直接启动本仓库内的 server：
 
 ```powershell
 pip install -r mcp-server\requirements.txt
@@ -326,7 +381,7 @@ claude mcp list
 - Cursor：写入 `~/.cursor/mcp.json`
 - Windsurf：写入 `~/.codeium/windsurf/mcp_config.json`
 
-> 通过 `npx github:wzyn20051216/solidworks-automation-skill` 安装时会自动运行注册器。若使用某些客户端的纯 skill 导入功能，客户端可能不会执行安装脚本，此时让 AI 运行上面的注册命令即可。
+> Skill 导入和 MCP 连接是两条路径：前者把仓库作为 skill 安装，后者把本地工具注册到 MCP 客户端。若使用某些客户端的纯 skill 导入功能，客户端可能不会执行安装脚本，此时让 AI 运行上面的注册命令即可。
 
 客户端手动配置示例：
 
@@ -343,7 +398,7 @@ claude mcp list
 }
 ```
 
-第一阶段已暴露 `solidworks_connect`、`solidworks_open_document`、`solidworks_save_document`、`solidworks_export_active`、`solidworks_review_active`、`solidworks_add_rotary_motor` 等工具。CAD Studio 侧还暴露 `cadstudio_write_open_format`、`cadstudio_check_dfm`、`cadstudio_check_routing`、`cadstudio_fea_preflight`、`cadstudio_prepare_fea` 和 `cadstudio_review_advanced_geometry`。更多说明见 [mcp-server/README.md](mcp-server/README.md)。
+第一阶段已暴露 `solidworks_connect`、`solidworks_open_document`、`solidworks_save_document`、`solidworks_export_active`、`solidworks_review_active`、`solidworks_add_rotary_motor` 等工具；配置族新增 `solidworks_inspect_configurations`、`solidworks_create_configuration`、`solidworks_activate_configuration`。工程图子技能还暴露 `solidworks_generate_drawing`、`solidworks_review_drawing`、`solidworks_inspect_drawing`。CAD Studio 侧还暴露 `cadstudio_write_open_format`、`cadstudio_check_dfm`、`cadstudio_check_routing`、`cadstudio_fea_preflight`、`cadstudio_prepare_fea` 和 `cadstudio_review_advanced_geometry`。更多说明见 [mcp-server/README.md](mcp-server/README.md)。
 
 当前 MCP 还包含 `solidworks_health_check`、`solidworks_create_basic_part`、`solidworks_add_component`、`solidworks_add_coincident_mate`、`solidworks_add_distance_mate`、`solidworks_add_concentric_mate`、`solidworks_set_component_fixed`、`solidworks_set_appearance` 等基础工具。复杂圆角/倒角仍建议作为后续专项优化，不作为基准 demo 的成功标准。
 
@@ -526,7 +581,12 @@ model.Extension.SelectByID2(
 
 ### ⭐ Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=wzyn20051216/solidworks-automation-skill&type=Date)](https://www.star-history.com/#wzyn20051216/solidworks-automation-skill&Date)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="./assets/star-history-dark.svg">
+  <img alt="solidworks-automation-skill Star History" src="./assets/star-history.svg">
+</picture>
+
+趋势图由仓库内的 GitHub Actions 每周自动更新，不依赖第三方托管图表接口。
 
 ### ❓ 常见问题
 
@@ -577,6 +637,14 @@ model.Extension.SelectByID2(
 
 ## English
 
+### 🎞️ Real SolidWorks showcase
+
+<p align="center">
+  <img src="assets/showcase/solidworks-engineering-drawing-demo.gif" alt="Code-driven SolidWorks modeling and GB/T drawing generation" width="900">
+</p>
+
+The `solidworks-engineering-drawing` subskill runs a public-domain NIST test artifact through SolidWorks 2026 SP01.1 and produces native `SLDPRT`, `SLDDRW`, PDF, and structured evidence/review files. The drawing includes standard views, an isometric view, an A-A section, and ten required dimensions. This capability remains `pilot`: automated checks support review but do not replace engineering sign-off.
+
 ### ✨ Features
 
 - 🔧 **Part Modeling** - Sketching, extrusion, revolution, chamfer, fillet, patterns
@@ -601,15 +669,22 @@ model.Extension.SelectByID2(
 
 ### 🚀 Quick Start
 
-#### Option 1: Install with npx
+#### Option 1: Install as Skill
 
 ```bash
 npx github:wzyn20051216/solidworks-automation-skill
 ```
 
-This installs the skill into detected Claude/Codex/OpenClaw skill directories.
+#### Option 2: Install with Smithery
 
-#### Option 2: Clone Manually
+```powershell
+npm install -g @smithery/cli
+smithery mcp add wzyn20051216/solidworks-automation-skill --client codex --config '{}'
+```
+
+Skip the first line if `smithery --version` already works. Replace `--client codex` with another Smithery-supported client such as `claude`, `cursor`, `vscode`, `windsurf`, or `opencode`.
+
+#### Option 3: Clone Manually
 
 ```bash
 git clone https://github.com/wzyn20051216/solidworks-automation-skill.git
