@@ -327,6 +327,20 @@
       "allowed_modes": ["interactive", "reviewed"]
     },
     {
+      "id": "feature_graph_ir",
+      "label": "Feature Graph IR 试点 (submit_feature_graph)",
+      "level": "pilot",
+      "backends": ["solidworks-com"],
+      "verified_versions": ["2024", "2026"],
+      "dependencies": ["SolidWorks", "pywin32"],
+      "limitations": [
+        "v0.1 词表经真机验证: extrude_boss (含 flip/midplane) / extrude_cut (through_all) / circle_array 草图展开; 特征级 linear_pattern 的方向实体 (DName) 解析与 revolve/fillet/chamfer 在 v0.2 路线",
+        "引用锚点 (face_anchor) 不保证上游编辑后存活，重建语义而非编辑语义；面上草图默认拉伸方向可能与基准面相反，用 flip 显式控制",
+        "双路对比 + 闭式解体积校验是真机验证门; MCP 门禁 reviewed"
+      ],
+      "allowed_modes": ["reviewed"]
+    },
+    {
       "id": "drawing_dimension_insertion",
       "label": "SolidWorks 工程图模型尺寸自动插入",
       "level": "verified",

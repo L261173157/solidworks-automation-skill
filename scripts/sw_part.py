@@ -30,7 +30,8 @@ def _extrude_compatible(model, args3, cache_key):
     feature_manager = model.FeatureManager
     variants = {
         "FeatureExtrusion3": lambda: feature_manager.FeatureExtrusion3(*args3),
-        "FeatureExtrusion2": lambda: feature_manager.FeatureExtrusion2(*args3[:20]),
+        # SW2024 SP5 类型库实测: 2 系与 3 系同为 23 参 (P4 索引验证)。
+        "FeatureExtrusion2": lambda: feature_manager.FeatureExtrusion2(*args3),
     }
     _name, feature = resolve_variant(feature_manager, variants, cache_key=cache_key)
     return feature

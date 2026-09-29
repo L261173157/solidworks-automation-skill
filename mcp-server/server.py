@@ -70,6 +70,7 @@ def _load_automation_modules() -> None:
     drawing_spec = importlib.import_module("scripts.drawing_spec")
     _compare_module = importlib.import_module("scripts.sw_compare")
     _api_docs_module = importlib.import_module("scripts.api_docs_index")
+    _feature_graph_module = importlib.import_module("scripts.feature_graph")
 
     exports = {
         "connect_solidworks": connect.connect_solidworks,
@@ -142,6 +143,8 @@ def _load_automation_modules() -> None:
         "collect_model_fingerprint": _compare_module.collect_model_fingerprint,
         "api_docs_lookup": _api_docs_module.lookup,
         "api_docs_load_index": _api_docs_module.load_index,
+        "feature_graph_build": _feature_graph_module.build_from_ir,
+        "feature_graph_validate": _feature_graph_module.validate_ir,
     }
     globals().update(exports)
     pythoncom = importlib.import_module("pythoncom")
@@ -1873,6 +1876,35 @@ def solidworks_compare_documents(params: SolidWorksCompareDocumentsInput) -> str
     def op():
         sw, _model = connect_solidworks(wait_seconds=1)
         return compare_documents(sw, params.path_a, params.path_b)
+
+    return _run_locked(op, params.response_format)
+
+
+class SolidWorksSubmitFeatureGraphInput(BaseInput):
+    """Input for submitting a Feature Graph IR v1.0 build (pilot, reviewed mode)."""
+
+    ir: Dict[str, Any] = Field(..., description="Feature Graph IR v1.0 document (lengths in mm); see feature_graph.schema.json.")
+    out_path: str = Field(..., min_length=1, description="Output .sldprt path.")
+    overwrite: bool = Field(default=True, description="Overwrite the output file if it exists (backup rules still apply).")
+    response_format: ResponseFormat = Field(default=ResponseFormat.JSON, description="Return format.")
+
+
+@mcp.tool(
+    name="solidworks_submit_feature_graph",
+    title="Build Part from Feature Graph IR (pilot)",
+    annotations={
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+def solidworks_submit_feature_graph(params: SolidWorksSubmitFeatureGraphInput) -> str:
+    """Deterministically build a part from Feature Graph IR v1.0 (validate -> lower -> execute; reviewed mode only)."""
+
+    def op():
+        sw, _model = connect_solidworks(wait_seconds=1)
+        return feature_graph_build(sw, params.ir, params.out_path, overwrite=params.overwrite)
 
     return _run_locked(op, params.response_format)
 
