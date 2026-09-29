@@ -14,6 +14,11 @@ except ImportError:
     from sw_preflight import import_com_dependencies
     from sw_connect import open_document, safe_get_com_member
 
+try:
+    from .sw_selection import resolve_selection
+except ImportError:
+    from sw_selection import resolve_selection
+
 pythoncom, _win32com, VARIANT = import_com_dependencies()
 
 
@@ -602,25 +607,45 @@ def collect_mate_feature_summary(model):
     return result
 
 
+def _select_mate_entity(asm_model, spec_or_name, default_entity_type, *, append=False, mark=1):
+    """名称串走旧 SelectByID2 路径; dict/SelectionSpec 走声明式选择引擎。
+
+    声明式描述解析失败 (not_found/ambiguous) 时抛 ValueError, 绝不猜测。
+    """
+    if isinstance(spec_or_name, str):
+        return _select_by_id(asm_model.Extension, spec_or_name, default_entity_type, append=append, mark=mark)
+    _handle, evidence = resolve_selection(
+        asm_model,
+        spec_or_name,
+        entity_type_hint=default_entity_type,
+        append=append,
+        mark=mark,
+    )
+    if evidence.get("status") != "resolved":
+        raise ValueError(f"声明式选择失败: {evidence}")
+    return True
+
+
 def add_mate_coincident(asm_model, entity1_name, entity1_type, entity2_name, entity2_type):
     """
     添加重合配合
 
     参数:
-        entity1_name/entity2_name: 实体名称（面、边、点等）
-        entity1_type/entity2_type: 实体类型字符串（"FACE", "PLANE", "EDGE", "VERTEX" 等）
+        entity1_name/entity2_name: 实体名称字符串, 或声明式选择描述
+            (dict/SelectionSpec, 如 {"kind": "coordinate", "point_mm": [10, 20, 0]})
+        entity1_type/entity2_type: 名称串形态下的实体类型 ("FACE", "PLANE", "EDGE", "VERTEX" 等)
     """
     asm_model.ClearSelection2(True)
-    _select_by_id(asm_model.Extension, entity1_name, entity1_type, mark=1)
-    _select_by_id(asm_model.Extension, entity2_name, entity2_type, append=True, mark=1)
+    _select_mate_entity(asm_model, entity1_name, entity1_type, mark=1)
+    _select_mate_entity(asm_model, entity2_name, entity2_type, append=True, mark=1)
     return add_mate5_checked(asm_model, SW_MATE_COINCIDENT)
 
 
 def add_mate_concentric(asm_model, face1_name, face2_name):
-    """添加同心配合"""
+    """添加同心配合; 面参数可为名称串或声明式选择描述"""
     asm_model.ClearSelection2(True)
-    _select_by_id(asm_model.Extension, face1_name, "FACE", mark=1)
-    _select_by_id(asm_model.Extension, face2_name, "FACE", append=True, mark=1)
+    _select_mate_entity(asm_model, face1_name, "FACE", mark=1)
+    _select_mate_entity(asm_model, face2_name, "FACE", append=True, mark=1)
     return add_mate5_checked(asm_model, SW_MATE_CONCENTRIC, lock_rotation=False)
 
 
@@ -632,16 +657,16 @@ def add_mate_distance(asm_model, entity1_name, entity1_type, entity2_name, entit
         distance: 配合距离（米）
     """
     asm_model.ClearSelection2(True)
-    _select_by_id(asm_model.Extension, entity1_name, entity1_type, mark=1)
-    _select_by_id(asm_model.Extension, entity2_name, entity2_type, append=True, mark=1)
+    _select_mate_entity(asm_model, entity1_name, entity1_type, mark=1)
+    _select_mate_entity(asm_model, entity2_name, entity2_type, append=True, mark=1)
     return add_mate5_checked(asm_model, SW_MATE_DISTANCE, distance=distance)
 
 
 def add_mate_parallel(asm_model, face1_name, face2_name):
-    """添加平行配合"""
+    """添加平行配合; 面参数可为名称串或声明式选择描述"""
     asm_model.ClearSelection2(True)
-    _select_by_id(asm_model.Extension, face1_name, "FACE", mark=1)
-    _select_by_id(asm_model.Extension, face2_name, "FACE", append=True, mark=1)
+    _select_mate_entity(asm_model, face1_name, "FACE", mark=1)
+    _select_mate_entity(asm_model, face2_name, "FACE", append=True, mark=1)
     return add_mate5_checked(asm_model, SW_MATE_PARALLEL)
 
 

@@ -301,6 +301,19 @@
       "allowed_modes": ["reviewed"]
     },
     {
+      "id": "selection_engine",
+      "label": "声明式选择引擎 (SelectionSpec)",
+      "level": "pilot",
+      "backends": ["solidworks-com"],
+      "verified_versions": ["2024", "2026"],
+      "dependencies": ["SolidWorks", "pywin32"],
+      "limitations": [
+        "named/plane/coordinate/component/sketch_segment 形态经真机回归；face/edge/vertex 拓扑枚举为 pilot，几何签名歧义时返回候选清单不猜测",
+        "MCP 侧尚无独立 SelectionSpec 工具面，当前由库层配合函数与后续 IR 门消费"
+      ],
+      "allowed_modes": ["interactive", "reviewed"]
+    },
+    {
       "id": "drawing_dimension_insertion",
       "label": "SolidWorks 工程图模型尺寸自动插入",
       "level": "verified",

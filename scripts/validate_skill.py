@@ -55,6 +55,8 @@ REQUIRED_FILES = [
     "requirements-occt.txt",
     "requirements-pdf.txt",
     "scripts/sw_entity_reference.py",
+    "scripts/sw_selection.py",
+    "scripts/sw_delivery_comtypes_worker.py",
     "scripts/validate_mcp.py",
     "mcp-server/server.py",
     "mcp-server/README.md",
