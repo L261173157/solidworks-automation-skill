@@ -550,6 +550,14 @@ class SolidWorksSaveDocumentInput(BaseInput):
     """Input for saving the active document."""
 
     path: Optional[str] = Field(default=None, description="Optional Save As path. Omit to save current document.")
+    overwrite: bool = Field(
+        default=False,
+        description="Allow overwriting an existing file. Required when the Save As target already exists.",
+    )
+    backup: bool = Field(
+        default=True,
+        description="When overwriting, back up the original to <parent>/.cadstudio_backups/ with a SHA-256 manifest.",
+    )
     response_format: ResponseFormat = Field(default=ResponseFormat.JSON, description="Return format.")
 
 
@@ -558,6 +566,10 @@ class SolidWorksCloseDocumentsInput(BaseInput):
 
     close_all: bool = Field(default=False, description="Close all documents when true; otherwise close active document.")
     save_changes: bool = Field(default=False, description="Whether SolidWorks should save changed documents when closing all.")
+    confirm: bool = Field(
+        default=False,
+        description="Explicit confirmation for this destructive operation. Returns confirmation_required when false.",
+    )
     response_format: ResponseFormat = Field(default=ResponseFormat.JSON, description="Return format.")
 
 
@@ -1712,16 +1724,27 @@ def solidworks_set_component_fixed(params: SolidWorksSetComponentFixedInput) -> 
     },
 )
 def solidworks_save_document(params: SolidWorksSaveDocumentInput = SolidWorksSaveDocumentInput()) -> str:
-    """Save the active SolidWorks document, optionally using Save As."""
+    """Save the active SolidWorks document, optionally using Save As (overwrite requires explicit opt-in)."""
 
     def op():
         _sw, model = _active_model_required()
-        success = save_document(model, params.path)
-        return {
+        try:
+            success = save_document(model, params.path, overwrite=params.overwrite, backup=params.backup)
+        except FileExistsError as exc:
+            return {
+                "status": "target_exists",
+                "error_type": "FileExistsError",
+                "message": str(exc),
+                "suggestion": "重复调用并设置 overwrite=true; backup=true (默认) 会先自动备份原文件。",
+            }
+        result = {
             "status": "ok" if success else "failed",
             "success": bool(success),
             "document": _model_summary(model),
         }
+        if params.path and params.overwrite:
+            result["backup_dir"] = str(Path(params.path).expanduser().parent / ".cadstudio_backups")
+        return result
 
     return _run_locked(op, params.response_format)
 
@@ -1741,6 +1764,13 @@ def solidworks_close_documents(params: SolidWorksCloseDocumentsInput = SolidWork
 
     def op():
         sw, model = _active_model_required()
+        if not params.confirm:
+            target = "所有打开的文档" if params.close_all else (get_com_member(model, "GetTitle") or "活动文档")
+            return {
+                "status": "confirmation_required",
+                "impact": f"将关闭{target}" + ("" if params.save_changes else " (未保存的更改将丢失)"),
+                "hint": "重复调用并设置 confirm=true 以执行关闭。",
+            }
         if params.close_all:
             sw.CloseAllDocuments(bool(params.save_changes))
             return {"status": "ok", "closed": "all", "save_changes": params.save_changes}

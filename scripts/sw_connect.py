@@ -3,7 +3,10 @@ SolidWorks 连接工具
 提供连接到 SolidWorks 实例的各种方法
 """
 import glob
+import hashlib
+import json
 import os
+import shutil
 import tempfile
 import time
 from pathlib import Path
@@ -583,13 +586,42 @@ def open_document(sw, file_path, read_only=False, silent=False, raise_on_error=F
     return model
 
 
-def save_document(model, file_path=None):
+def _backup_existing_target(target: Path) -> Path:
+    """把将被覆盖的文档备份到 <parent>/.cadstudio_backups/ 并登记 SHA-256 清单。"""
+    backup_dir = target.parent / ".cadstudio_backups"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d_%H%M%S")
+    backup_path = backup_dir / f"{target.stem}.{stamp}{target.suffix}"
+    shutil.copy2(target, backup_path)
+    digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    manifest_path = backup_dir / "manifest.json"
+    try:
+        records = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if not isinstance(records, list):
+            records = []
+    except Exception:  # noqa: BLE001 - 清单损坏时重建
+        records = []
+    records.append(
+        {
+            "original": str(target),
+            "backup": str(backup_path),
+            "sha256": digest,
+            "timestamp": stamp,
+        }
+    )
+    manifest_path.write_text(json.dumps(records, ensure_ascii=False, indent=1), encoding="utf-8")
+    return backup_path
+
+
+def save_document(model, file_path=None, *, overwrite=False, backup=True):
     """
     保存文档。
 
     参数:
         model: IModelDoc2 对象
         file_path: 另存为路径，None 则保存到当前位置
+        overwrite: 目标已存在时是否允许覆盖 (原地保存同一路径不需要)
+        backup: 覆盖前是否自动备份原文件到 <parent>/.cadstudio_backups/
 
     返回:
         bool 成功/失败
@@ -600,9 +632,23 @@ def save_document(model, file_path=None):
     if file_path:
         file_path = _expand_path(file_path)
         _ensure_parent_dir(file_path)
+        target = Path(file_path)
+        if target.exists() and not overwrite:
+            current = str(get_com_member(model, "GetPathName") or "")
+            if not (current and Path(current).resolve() == target.resolve()):
+                # 覆盖已有文档是破坏性操作: 显式 overwrite=True 才放行。
+                raise FileExistsError(
+                    f"SW_SAVE_TARGET_EXISTS: 目标已存在且未允许覆盖: {target} "
+                    f"(overwrite=True 允许覆盖; backup=True 时自动备份原文件)"
+                )
+        backup_path = None
+        if target.exists() and overwrite and backup:
+            backup_path = _backup_existing_target(target)
         success = model.Extension.SaveAs(
             file_path, 0, 1, create_empty_dispatch_variant(), errors, warnings
         )
+        if success and backup_path is not None:
+            print(f"已备份原文件: {backup_path}")
     else:
         success = model.Save3(1, errors, warnings)
 

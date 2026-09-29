@@ -12,7 +12,28 @@ except ImportError:
     from sw_connect import get_com_member
     from sw_preflight import import_com_dependencies
 
+try:
+    from .sw_api_compat import resolve_variant
+except ImportError:
+    from sw_api_compat import resolve_variant
+
 pythoncom, _win32com, VARIANT = import_com_dependencies()
+
+
+def _extrude_compatible(model, args3, cache_key):
+    """FeatureExtrusion3 -> 2 兼容链。
+
+    部分版本 (如 SW2025) 的 FeatureExtrusion3 存在兼容问题; 2 系签名少末尾
+    三个起始条件参数 (T0/StartOffset/FlipStartOffset), 其余 20 参对齐。
+    胜出变体按 SolidWorks 版本缓存在 api_compat.json。
+    """
+    feature_manager = model.FeatureManager
+    variants = {
+        "FeatureExtrusion3": lambda: feature_manager.FeatureExtrusion3(*args3),
+        "FeatureExtrusion2": lambda: feature_manager.FeatureExtrusion2(*args3[:20]),
+    }
+    _name, feature = resolve_variant(feature_manager, variants, cache_key=cache_key)
+    return feature
 
 PLANE_NAME_ALIASES = {
     "Front Plane": ["Front Plane", "前视基准面"],
@@ -606,30 +627,34 @@ def extrude_boss(model, sketch_name, depth, direction=True, merge=True):
         merge: True=合并结果
     """
     _ensure_sketch_selected(model, sketch_name)
-    return model.FeatureManager.FeatureExtrusion3(
-        True,         # Sd: 单向拉伸
-        False,        # Flip
-        direction,    # Dir: 拉伸方向
-        0,            # T1: Blind
-        0,            # T2: Blind
-        depth,        # D1
-        0.0,          # D2
-        False,        # Dchk1
-        False,        # Dchk2
-        False,        # Ddir1
-        False,        # Ddir2
-        0.0,          # Dang1
-        0.0,          # Dang2
-        False,        # OffsetReverse1
-        False,        # OffsetReverse2
-        False,        # TranslateSurface1
-        False,        # TranslateSurface2
-        merge,        # Merge
-        False,        # UseFeatScope
-        True,         # UseAutoSelect
-        0,            # T0: 从草图平面开始
-        0.0,          # StartOffset
-        False         # FlipStartOffset
+    return _extrude_compatible(
+        model,
+        (
+            True,         # Sd: 单向拉伸
+            False,        # Flip
+            direction,    # Dir: 拉伸方向
+            0,            # T1: Blind
+            0,            # T2: Blind
+            depth,        # D1
+            0.0,          # D2
+            False,        # Dchk1
+            False,        # Dchk2
+            False,        # Ddir1
+            False,        # Ddir2
+            0.0,          # Dang1
+            0.0,          # Dang2
+            False,        # OffsetReverse1
+            False,        # OffsetReverse2
+            False,        # TranslateSurface1
+            False,        # TranslateSurface2
+            merge,        # Merge
+            False,        # UseFeatScope
+            True,         # UseAutoSelect
+            0,            # T0: 从草图平面开始
+            0.0,          # StartOffset
+            False         # FlipStartOffset
+        ),
+        "part.extrude_boss",
     )
 
 
@@ -672,30 +697,34 @@ def extrude_midplane(model, sketch_name, total_depth):
         total_depth: 总深度（米），每侧为 total_depth/2
     """
     _ensure_sketch_selected(model, sketch_name)
-    return model.FeatureManager.FeatureExtrusion3(
-        True,         # Sd: 单向定义，终止条件控制为中面
-        False,        # Flip
-        True,         # Dir
-        6,            # T1: swEndCondMidPlane
-        0,            # T2
-        total_depth,  # D1
-        0.0,          # D2
-        False,        # Dchk1
-        False,        # Dchk2
-        False,        # Ddir1
-        False,        # Ddir2
-        0.0,          # Dang1
-        0.0,          # Dang2
-        False,        # OffsetReverse1
-        False,        # OffsetReverse2
-        False,        # TranslateSurface1
-        False,        # TranslateSurface2
-        True,         # Merge
-        False,        # UseFeatScope
-        True,         # UseAutoSelect
-        0,            # T0
-        0.0,          # StartOffset
-        False         # FlipStartOffset
+    return _extrude_compatible(
+        model,
+        (
+            True,         # Sd: 单向定义，终止条件控制为中面
+            False,        # Flip
+            True,         # Dir
+            6,            # T1: swEndCondMidPlane
+            0,            # T2
+            total_depth,  # D1
+            0.0,          # D2
+            False,        # Dchk1
+            False,        # Dchk2
+            False,        # Ddir1
+            False,        # Ddir2
+            0.0,          # Dang1
+            0.0,          # Dang2
+            False,        # OffsetReverse1
+            False,        # OffsetReverse2
+            False,        # TranslateSurface1
+            False,        # TranslateSurface2
+            True,         # Merge
+            False,        # UseFeatScope
+            True,         # UseAutoSelect
+            0,            # T0
+            0.0,          # StartOffset
+            False         # FlipStartOffset
+        ),
+        "part.extrude_midplane",
     )
 
 
