@@ -68,6 +68,7 @@ def _load_automation_modules() -> None:
     mass_module = importlib.import_module("scripts.sw_mass_properties")
     drawing_review = importlib.import_module("scripts.sw_drawing_review")
     drawing_spec = importlib.import_module("scripts.drawing_spec")
+    _compare_module = importlib.import_module("scripts.sw_compare")
 
     exports = {
         "connect_solidworks": connect.connect_solidworks,
@@ -136,6 +137,8 @@ def _load_automation_modules() -> None:
         "review_manufacturing_drawing": review.review_manufacturing_drawing,
         "overall_dimensions": inspect_module.overall_dimensions,
         "mass_properties": mass_module.mass_properties,
+        "compare_documents": _compare_module.compare_documents,
+        "collect_model_fingerprint": _compare_module.collect_model_fingerprint,
     }
     globals().update(exports)
     pythoncom = importlib.import_module("pythoncom")
@@ -1741,6 +1744,34 @@ def solidworks_close_documents(params: SolidWorksCloseDocumentsInput = SolidWork
         title = get_com_member(model, "GetTitle")
         sw.CloseDoc(title)
         return {"status": "ok", "closed": title}
+
+    return _run_locked(op, params.response_format)
+
+
+class SolidWorksCompareDocumentsInput(BaseInput):
+    """Input for objective document comparison."""
+
+    path_a: str = Field(..., min_length=1, description="First document path (.sldprt/.sldasm).")
+    path_b: str = Field(..., min_length=1, description="Second document path (.sldprt/.sldasm).")
+    response_format: ResponseFormat = Field(default=ResponseFormat.JSON, description="Return format.")
+
+
+@mcp.tool(
+    name="solidworks_compare_documents",
+    title="Compare Two SolidWorks Documents",
+    annotations={
+        "readOnlyHint": True,
+        "destructiveHint": False,
+        "idempotentHint": True,
+        "openWorldHint": False,
+    },
+)
+def solidworks_compare_documents(params: SolidWorksCompareDocumentsInput) -> str:
+    """Objectively compare two documents: topology counts + mass metrics -> verified/mismatch/review_required."""
+
+    def op():
+        sw, _model = connect_solidworks(wait_seconds=1)
+        return compare_documents(sw, params.path_a, params.path_b)
 
     return _run_locked(op, params.response_format)
 

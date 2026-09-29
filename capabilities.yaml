@@ -314,6 +314,19 @@
       "allowed_modes": ["interactive", "reviewed"]
     },
     {
+      "id": "objective_compare",
+      "label": "客观文档对比 (compare_documents)",
+      "level": "verified",
+      "backends": ["solidworks-com"],
+      "verified_versions": ["2024", "2026"],
+      "dependencies": ["SolidWorks", "pywin32"],
+      "limitations": [
+        "计数与标量指标 (体积/表面积/质心) 对比，不构成拓扑同构证明",
+        "verdict 是交付证据，不替代 sw_review 人工审查"
+      ],
+      "allowed_modes": ["interactive", "reviewed"]
+    },
+    {
       "id": "drawing_dimension_insertion",
       "label": "SolidWorks 工程图模型尺寸自动插入",
       "level": "verified",
