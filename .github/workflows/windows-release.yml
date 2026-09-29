@@ -40,6 +40,10 @@ jobs:
           python scripts/validate_skill.py
           python scripts/validate_mcp.py
           python scripts/release_check.py
+      - name: Run fake-COM smoke tests (no SolidWorks required)
+        env:
+          CADSTUDIO_FAKE_COM: "1"
+        run: python -m pytest tests/test_fake_com_smoke.py -q
       - name: Install frontend dependencies
         working-directory: apps/workbench-ui
         run: npm ci
