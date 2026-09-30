@@ -58,6 +58,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Inspect portable test runtime
+        run: node ai_team/release-portable-e2e.cjs --preflight
       - name: Test Rust backend
         working-directory: apps/workbench-ui/src-tauri
         run: |
@@ -126,15 +128,34 @@ jobs:
         run: powershell -File scripts/build_windows_release.ps1
       - name: Verify updater release contract
         run: powershell -File scripts/verify_updater_release.ps1
+      - name: Smoke-test production-config portable startup
+        run: node ai_team/release-portable-e2e.cjs --startup-smoke
+      - name: Smoke-test production-config installer
+        run: powershell -NoProfile -File ai_team/nsis-install-e2e.ps1
+      - name: Build isolated CI E2E package
+        if: env.CAD_STUDIO_UPDATER_SIGNING_MODE == 'ci-test'
+        run: powershell -File scripts/build_windows_release.ps1 -CiE2e
+      - name: Verify isolated CI E2E signature
+        if: env.CAD_STUDIO_UPDATER_SIGNING_MODE == 'ci-test'
+        run: powershell -File scripts/verify_updater_release.ps1
       - name: Install Playwright browser
         working-directory: apps/workbench-ui
         run: npx playwright install chromium
       - name: Test portable and installer packages
+        env:
+          CAD_STUDIO_E2E_CDP_CONFIGURED: ${{ env.CAD_STUDIO_UPDATER_SIGNING_MODE == 'ci-test' && '1' || '0' }}
         run: |
           node ai_team/release-portable-e2e.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell -NoProfile -File ai_team/nsis-install-e2e.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload portable test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: portable-e2e-diagnostics
+          if-no-files-found: ignore
+          path: output/ci/portable-e2e-*.json
       - uses: actions/upload-artifact@v7
         with:
           name: cad-studio-windows-x64-${{ startsWith(github.ref, 'refs/tags/v') && 'release' || 'ci-test' }}

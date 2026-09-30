@@ -236,3 +236,34 @@ function cargo {
     assert expected in result.stderr
     assert not list(tmp_path.glob("cad-studio-updater-public-*.key"))
     assert not list(tmp_path.glob("cad-studio-updater-signature-*.sig"))
+
+
+def test_instrumented_build_is_explicit_ci_only_and_preserves_production_config():
+    script = BUILD.read_text(encoding="utf-8")
+    assert 'if ($CiE2e -and (-not $isTestSigning -or $SkipBuild))' in script
+    assert script.index('if ($CiE2e -and') < script.index('& python $syncScript')
+    assert '--remote-debugging-address=127.0.0.1 --remote-debugging-port=9227' in script
+    assert 'Join-Path $env:RUNNER_TEMP "cad-studio-ci-e2e.tauri.json"' in script
+    assert 'npm run desktop:bundle -- --config $overlayPath' in script
+    assert 'CI-E2E-INSTRUMENTED.txt' in script
+    assert '$checksumArtifacts += $instrumentedMarker' in script
+    assert 'Set-Content -LiteralPath (Join-Path $tauriRoot "tauri.conf.json")' not in script
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert workflow.index('Smoke-test production-config portable startup') < workflow.index('Build isolated CI E2E package')
+    assert 'path: output/ci/portable-e2e-*.json' in workflow
+
+
+@pytest.mark.parametrize('mode,ref,actions,skip_build', [
+    ('production', 'refs/tags/v0.3.4', 'true', False),
+    ('production', 'refs/heads/main', 'true', False),
+    ('ci-test', 'refs/tags/v0.3.4', 'true', False),
+    ('ci-test', 'refs/heads/main', 'false', False),
+    ('ci-test', 'refs/heads/main', 'true', True),
+])
+def test_instrumented_build_rejects_release_local_and_skip_build(tmp_path, mode, ref, actions, skip_build):
+    result = run_powershell(tmp_path, '& $env:BUILD_SCRIPT -CiE2e' + (' -SkipBuild' if skip_build else ''), {
+        'BUILD_SCRIPT': str(BUILD), 'GITHUB_ACTIONS': actions, 'GITHUB_REF': ref,
+        'CAD_STUDIO_UPDATER_SIGNING_MODE': mode, 'CAD_STUDIO_TEST_UPDATER_PUBLIC_KEY': TEST_KEY if mode == 'ci-test' else '',
+    })
+    assert result.returncode != 0
+    assert 'CI test' in result.stderr or 'non-release CI test build' in result.stderr
