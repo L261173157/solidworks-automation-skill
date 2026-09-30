@@ -37,9 +37,13 @@ jobs:
       - name: Run Python tests
         run: |
           python -m pytest -q
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/validate_skill.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/validate_mcp.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/release_check.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Run fake-COM smoke tests (no SolidWorks required)
         env:
           CADSTUDIO_FAKE_COM: "1"
@@ -51,34 +55,71 @@ jobs:
         working-directory: apps/workbench-ui
         run: |
           npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Inspect portable test runtime
+        run: node ai_team/release-portable-e2e.cjs --preflight
       - name: Test Rust backend
         working-directory: apps/workbench-ui/src-tauri
         run: |
           cargo fmt -- --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo clippy -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Configure updater signing key
         working-directory: apps/workbench-ui
         env:
           RELEASE_SIGNING_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           RELEASE_SIGNING_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
+          function Protect-LogValue([string]$Value) {
+            foreach ($line in ($Value -split "`r?`n")) {
+              if (-not [string]::IsNullOrWhiteSpace($line)) {
+                $escaped = $line.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+                Write-Output "::add-mask::$escaped"
+              }
+            }
+          }
           $signingKey = $env:RELEASE_SIGNING_KEY
           $signingPassword = $env:RELEASE_SIGNING_KEY_PASSWORD
+          $signingMode = "production"
+          $testPublicKey = ""
           if ([string]::IsNullOrWhiteSpace($signingKey)) {
-            if ("${{ startsWith(github.ref, 'refs/tags/v') }}" -eq "true") {
+            if ($env:GITHUB_REF -like "refs/tags/v*") {
               throw "TAURI_SIGNING_PRIVATE_KEY is required for a public release tag."
             }
+            if ($env:GITHUB_ACTIONS -ne "true" -or $env:GITHUB_REF -notmatch '^refs/(heads|pull)/') {
+              throw "Temporary updater signing is restricted to non-release branch/PR CI runs."
+            }
+            $signingMode = "ci-test"
             $temporaryKey = Join-Path $env:RUNNER_TEMP "cad-studio-ci-updater.key"
             $passwordBytes = New-Object byte[] 32
             [System.Security.Cryptography.RandomNumberGenerator]::Fill($passwordBytes)
             $signingPassword = [Convert]::ToBase64String($passwordBytes)
-            npx tauri signer generate --password $signingPassword --write-keys $temporaryKey --ci
-            if ($LASTEXITCODE -ne 0) { throw "Cannot generate temporary updater signing key." }
-            $signingKey = Get-Content -LiteralPath $temporaryKey -Raw
+            Protect-LogValue $signingPassword
+            try {
+              # The signer may print key material; never forward its output to CI logs.
+              npx tauri signer generate --password $signingPassword --write-keys $temporaryKey --ci *> $null
+              if ($LASTEXITCODE -ne 0) { throw "Cannot generate temporary updater signing key." }
+              $signingKey = (Get-Content -LiteralPath $temporaryKey -Raw).Trim()
+              Protect-LogValue $signingKey
+              $testPublicKey = (Get-Content -LiteralPath "$temporaryKey.pub" -Raw).Trim()
+              if ([string]::IsNullOrWhiteSpace($testPublicKey)) { throw "Temporary updater public key is missing." }
+            }
+            finally {
+              foreach ($keyPath in @($temporaryKey, "$temporaryKey.pub")) {
+                if (Test-Path -LiteralPath $keyPath) { Remove-Item -LiteralPath $keyPath -Force }
+              }
+            }
           }
           if ([string]::IsNullOrWhiteSpace($signingPassword)) { throw "Updater signing key password is missing." }
+          Protect-LogValue $signingKey
+          Protect-LogValue $signingPassword
+          "CAD_STUDIO_UPDATER_SIGNING_MODE=$signingMode" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "CAD_STUDIO_TEST_UPDATER_PUBLIC_KEY=$testPublicKey" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "TAURI_SIGNING_PRIVATE_KEY<<CAD_STUDIO_SIGNING_KEY" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           $signingKey | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "CAD_STUDIO_SIGNING_KEY" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
@@ -87,19 +128,40 @@ jobs:
         run: powershell -File scripts/build_windows_release.ps1
       - name: Verify updater release contract
         run: powershell -File scripts/verify_updater_release.ps1
+      - name: Smoke-test production-config portable startup
+        run: node ai_team/release-portable-e2e.cjs --startup-smoke
+      - name: Smoke-test production-config installer
+        run: powershell -NoProfile -File ai_team/nsis-install-e2e.ps1
+      - name: Build isolated CI E2E package
+        if: env.CAD_STUDIO_UPDATER_SIGNING_MODE == 'ci-test'
+        run: powershell -File scripts/build_windows_release.ps1 -CiE2e
+      - name: Verify isolated CI E2E signature
+        if: env.CAD_STUDIO_UPDATER_SIGNING_MODE == 'ci-test'
+        run: powershell -File scripts/verify_updater_release.ps1
       - name: Install Playwright browser
         working-directory: apps/workbench-ui
         run: npx playwright install chromium
       - name: Test portable and installer packages
+        env:
+          CAD_STUDIO_E2E_CDP_CONFIGURED: ${{ env.CAD_STUDIO_UPDATER_SIGNING_MODE == 'ci-test' && '1' || '0' }}
         run: |
           node ai_team/release-portable-e2e.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell -NoProfile -File ai_team/nsis-install-e2e.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Upload portable test diagnostics
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: portable-e2e-diagnostics
+          if-no-files-found: ignore
+          path: output/ci/portable-e2e-*.json
       - uses: actions/upload-artifact@v7
         with:
-          name: cad-studio-windows-x64
+          name: cad-studio-windows-x64-${{ startsWith(github.ref, 'refs/tags/v') && 'release' || 'ci-test' }}
           path: release-output/*
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') && env.CAD_STUDIO_UPDATER_SIGNING_MODE == 'production'
         uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true

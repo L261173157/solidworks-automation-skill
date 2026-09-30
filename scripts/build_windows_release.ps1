@@ -1,9 +1,23 @@
 param(
     [string]$Version = "",
-    [switch]$SkipBuild
+    [switch]$SkipBuild,
+    [switch]$CiE2e
 )
 
 $ErrorActionPreference = "Stop"
+$isTestSigning = $env:CAD_STUDIO_UPDATER_SIGNING_MODE -eq "ci-test"
+if ($isTestSigning -and ($env:GITHUB_ACTIONS -ne "true" -or $env:GITHUB_REF -notmatch '^refs/(heads|pull)/' -or [string]::IsNullOrWhiteSpace($env:CAD_STUDIO_TEST_UPDATER_PUBLIC_KEY))) {
+    throw "CI test packages require a temporary public key and a non-release branch/PR CI run."
+}
+if (-not $isTestSigning -and -not [string]::IsNullOrWhiteSpace($env:CAD_STUDIO_TEST_UPDATER_PUBLIC_KEY)) {
+    throw "Test updater public keys cannot be used for production packages."
+}
+if ($env:CAD_STUDIO_UPDATER_SIGNING_MODE -and $env:CAD_STUDIO_UPDATER_SIGNING_MODE -notin @("production", "ci-test")) {
+    throw "Unknown updater signing mode."
+}
+if ($CiE2e -and (-not $isTestSigning -or $SkipBuild)) {
+    throw "Instrumented E2E packages require an explicit non-release CI test build."
+}
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $syncScript = Join-Path $PSScriptRoot "sync_bundled_skill.py"
 & python $syncScript
@@ -43,8 +57,27 @@ $portableRoot = Join-Path $releaseRoot $portableName
 if (-not $SkipBuild) {
     Push-Location $uiRoot
     try {
-        npm run desktop:bundle
-        if ($LASTEXITCODE -ne 0) { throw "Tauri build failed." }
+        if ($CiE2e) {
+            # Fixed loopback-only test instrumentation. Never consume arbitrary browser flags.
+            # WebView2 >=150 ignores environment overrides for elevated hosts.
+            $testWindow = $tauriConfig.app.windows[0]
+            $testWindow | Add-Member -NotePropertyName additionalBrowserArgs -NotePropertyValue "--remote-debugging-address=127.0.0.1 --remote-debugging-port=9227" -Force
+            $testWindow | Add-Member -NotePropertyName dataDirectory -NotePropertyValue "ci-e2e-only" -Force
+            $overlay = @{ app = @{ windows = @($testWindow) } } | ConvertTo-Json -Depth 20
+            $overlayPath = Join-Path $env:RUNNER_TEMP "cad-studio-ci-e2e.tauri.json"
+            [System.IO.File]::WriteAllText($overlayPath, $overlay, (New-Object System.Text.UTF8Encoding($false)))
+            try {
+                npm run desktop:bundle -- --config $overlayPath
+                if ($LASTEXITCODE -ne 0) { throw "Instrumented CI Tauri build failed." }
+            }
+            finally {
+                if (Test-Path -LiteralPath $overlayPath) { Remove-Item -LiteralPath $overlayPath -Force }
+            }
+        }
+        else {
+            npm run desktop:bundle
+            if ($LASTEXITCODE -ne 0) { throw "Tauri build failed." }
+        }
     }
     finally {
         Pop-Location
@@ -107,7 +140,21 @@ $latestPath = Join-Path $releaseRoot "latest.json"
 $latestJson = $latest | ConvertTo-Json -Depth 5
 [System.IO.File]::WriteAllText($latestPath, $latestJson, (New-Object System.Text.UTF8Encoding($false)))
 
-$checksums = @($setupPath, $signaturePath, $portableZip, $latestPath) | ForEach-Object {
+$checksumArtifacts = @($setupPath, $signaturePath, $portableZip, $latestPath)
+if ($isTestSigning) {
+    $testMarkerPath = Join-Path $releaseRoot "CI-TEST-ONLY.txt"
+    "NON-RELEASE CI TEST ARTIFACTS. Signed with an ephemeral test key, not trusted by the production CAD Studio updater. Do not publish as a release." | Set-Content -LiteralPath $testMarkerPath -Encoding ascii
+    $checksumArtifacts += $testMarkerPath
+}
+if ($CiE2e) {
+    $instrumentedMarker = Join-Path $releaseRoot "CI-E2E-INSTRUMENTED.txt"
+    "NON-RELEASE TEST BUILD: loopback CDP instrumentation is enabled through a temporary Tauri config. Production-config startup is smoke-tested separately. Never publish this package." | Set-Content -LiteralPath $instrumentedMarker -Encoding ascii
+    Copy-Item -LiteralPath $instrumentedMarker -Destination $portableRoot
+    # Include the warning inside the portable archive too.
+    Compress-Archive -Path (Join-Path $portableRoot "*") -DestinationPath $portableZip -CompressionLevel Optimal -Force
+    $checksumArtifacts += $instrumentedMarker
+}
+$checksums = $checksumArtifacts | ForEach-Object {
     $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $_
     "$($hash.Hash.ToLowerInvariant())  $([System.IO.Path]::GetFileName($_))"
 }

@@ -62,34 +62,37 @@ QUEUE_WRITE_RETRIES = 24
 
 
 def _capability_block_reasons(job: dict[str, Any]) -> list[str]:
-    """@brief 根据能力真源阻止未验证能力的无人值守交付。"""
-    requested = job.get("capabilities") or []
-    if not isinstance(requested, list) or not requested:
-        return []
-    if job.get("schemaVersion") != "2.0":
+    """@brief 校验所有受支持任务的能力声明，不能因版本、格式或清单错误放行。"""
+    # 无版本的旧队列仍可读取；显式版本必须属于已支持协议。
+    if "schemaVersion" in job and job["schemaVersion"] not in ("1.0", "2.0"):
+        return [f"不支持的任务 schemaVersion: {job['schemaVersion']!r}"]
+    requested = job.get("capabilities", [])
+    if not isinstance(requested, list) or not all(isinstance(item, str) and item.strip() for item in requested):
+        return ["capabilities 必须是非空能力 ID 的字符串数组"]
+    policy = job.get("policy", {})
+    if not isinstance(policy, dict):
+        return ["policy 必须是对象"]
+    cad_capabilities = [item for item in requested if item not in DANGEROUS_CAPABILITIES]
+    if not cad_capabilities:
+        # 未声明 CAD 能力的兼容任务只允许生成待人工复核结果，见 _capability_review_reasons。
         return []
     try:
-        import sys
-
         scripts_dir = Path(__file__).resolve().parents[3] / "scripts"
         if str(scripts_dir) not in sys.path:
             sys.path.insert(0, str(scripts_dir))
         from capabilities import capability_index, load_capabilities
 
         index = capability_index(load_capabilities())
-    except Exception:
-        # 能力清单缺失时不改变旧版任务行为，由静态校验报告问题。
-        return []
-    policy = job.get("policy", {})
+        if not index:
+            raise ValueError("能力清单为空")
+    except Exception as error:
+        return [f"无法读取或验证能力清单，已阻止执行: {error}"]
     manual_required = policy.get("approval") == "manual-required"
     reviewer_required = policy.get("requireReviewerPass") is True
     reasons: list[str] = []
-    for capability_id in requested:
-        # 安全权限不是 CAD 能力。它们由 require_policy_approval() 单独处理，
-        # 不能因为未写入 capabilities.yaml 就把已授权的 CAD 任务直接标记为 blocked。
-        if str(capability_id) in DANGEROUS_CAPABILITIES:
-            continue
-        item = index.get(str(capability_id))
+    for capability_id in cad_capabilities:
+        # 安全权限仍由 require_policy_approval() 单独处理，不能当作未知 CAD 能力。
+        item = index.get(capability_id)
         if not item:
             reasons.append(f"{capability_id} 不在能力清单中")
             continue
@@ -102,6 +105,14 @@ def _capability_block_reasons(job: dict[str, Any]) -> list[str]:
             continue
         reasons.append(f"{capability_id} 当前等级为 {level}，执行模式不满足能力限制")
     return reasons
+
+
+def _capability_review_reasons(job: dict[str, Any]) -> list[str]:
+    """@brief 保留旧任务和草案复核流程，但缺少 CAD 能力声明时禁止自动交付通过。"""
+    requested = job.get("capabilities", [])
+    if not any(item not in DANGEROUS_CAPABILITIES for item in requested):
+        return ["任务未声明可核验的 CAD 能力；安全权限不能替代 CAD 能力声明"]
+    return []
 
 
 class JobCancelled(RuntimeError):
@@ -1138,6 +1149,7 @@ def process_job(
             append_event(path.parent, job, "run.blocked", message, {"reasons": blocked_reasons})
             write_job(path, job)
             return job
+        capability_review_reasons = _capability_review_reasons(job)
         if job.get("executor") in {"codex", "agent"}:
             approval_reasons = require_policy_approval(job)
             if approval_reasons:
@@ -1172,7 +1184,7 @@ def process_job(
         job["artifactLedgerPath"] = ledger["ledgerPath"]
         job["artifacts"] = ledger["artifacts"]
         append_event(path.parent, job, "artifact.ledger_written", "交付物账本已写入", {"ledgerPath": ledger["ledgerPath"]})
-        review = write_reviewer_gate(path.parent, ledger)
+        review = write_reviewer_gate(path.parent, ledger, capability_review_reasons=capability_review_reasons)
         if is_cancel_requested(path):
             raise JobCancelled("任务已请求取消")
         job["reviewGate"] = review

@@ -568,7 +568,12 @@ class SolidWorksCloseDocumentsInput(BaseInput):
     """Input for closing SolidWorks documents."""
 
     close_all: bool = Field(default=False, description="Close all documents when true; otherwise close active document.")
-    save_changes: bool = Field(default=False, description="Whether SolidWorks should save changed documents when closing all.")
+    save_changes: bool = Field(
+        default=False,
+        description="Save changed documents before closing, for both active-only and close-all. "
+        "If saving fails or a document needs a Save As path, leave documents open. "
+        "False explicitly discards unsaved changes after confirmation.",
+    )
     confirm: bool = Field(
         default=False,
         description="Explicit confirmation for this destructive operation. Returns confirmation_required when false.",
@@ -1752,6 +1757,21 @@ def solidworks_save_document(params: SolidWorksSaveDocumentInput = SolidWorksSav
     return _run_locked(op, params.response_format)
 
 
+def _close_document_state(model) -> dict:
+    """在关闭前读取文档标识和脏标记，避免关闭后访问失效的 COM 对象。"""
+    return {
+        "title": str(get_com_member(model, "GetTitle") or ""),
+        "path": str(get_com_member(model, "GetPathName") or ""),
+        "modified": bool(get_com_member(model, "GetSaveFlag")),
+        "visible": bool(get_com_member(model, "Visible")),
+    }
+
+
+def _close_document_key(state: dict) -> str:
+    """使用 Windows 路径或未命名文档标题匹配关闭前后的文档。"""
+    return (state["path"] or state["title"]).replace("\\", "/").casefold()
+
+
 @mcp.tool(
     name="solidworks_close_documents",
     title="Close SolidWorks Documents",
@@ -1763,23 +1783,134 @@ def solidworks_save_document(params: SolidWorksSaveDocumentInput = SolidWorksSav
     },
 )
 def solidworks_close_documents(params: SolidWorksCloseDocumentsInput = SolidWorksCloseDocumentsInput()) -> str:
-    """Close the active document or all documents in the current SolidWorks session."""
+    """显式保存或丢弃更改后关闭文档；保存失败时不执行关闭。"""
 
     def op():
-        sw, model = _active_model_required()
+        if params.close_all:
+            sw, model = connect_solidworks(wait_seconds=1)
+        else:
+            sw, model = _active_model_required()
+        documents = list(get_com_member(sw, "GetDocuments") or ())
+        states = [_close_document_state(doc) for doc in documents]
+        target_state = _close_document_state(model) if not params.close_all else None
+        target_key = _close_document_key(target_state) if target_state else None
+        targets = list(zip(documents, states)) if params.close_all else [(model, target_state)]
         if not params.confirm:
-            target = "所有打开的文档" if params.close_all else (get_com_member(model, "GetTitle") or "活动文档")
+            target = "所有打开的文档" if params.close_all else target_state["title"] or "活动文档"
+            impact = (
+                f"将先保存更改，再关闭{target}；未命名文档或保存失败时不执行关闭"
+                if params.save_changes else f"将关闭{target}，丢弃未保存的更改（包括未命名文档）"
+            )
+            if not params.close_all:
+                impact += "；SolidWorks 也可能关闭非活动的隐藏文档"
             return {
                 "status": "confirmation_required",
-                "impact": f"将关闭{target}" + ("" if params.save_changes else " (未保存的更改将丢失)"),
+                "impact": impact,
+                "save_changes": params.save_changes,
+                "discard_changes": not params.save_changes,
                 "hint": "重复调用并设置 confirm=true 以执行关闭。",
             }
-        if params.close_all:
-            sw.CloseAllDocuments(bool(params.save_changes))
-            return {"status": "ok", "closed": "all", "save_changes": params.save_changes}
-        title = get_com_member(model, "GetTitle")
-        sw.CloseDoc(title)
-        return {"status": "ok", "closed": title}
+
+        result = {
+            "status": "ok",
+            "closed": [],
+            "closed_documents": [],
+            "saved_documents": [],
+            "remaining_documents": [state for _doc, state in targets],
+            "save_changes": params.save_changes,
+            "discard_changes": not params.save_changes,
+        }
+        if params.save_changes:
+            # CloseDoc 还会关闭非活动隐藏文档；不要隐式保存或丢弃其它文档的更改。
+            at_risk = [
+                state for state in states
+                if not params.close_all and _close_document_key(state) != target_key
+                and not state["visible"] and (state["modified"] or not state["path"])
+            ]
+            if at_risk:
+                return {**result, "status": "blocked", "reason": "hidden_documents_at_risk",
+                        "documents": at_risk,
+                        "message": "Save or explicitly close the modified/unnamed hidden documents first."}
+            unnamed = [state for _doc, state in targets if not state["path"]]
+            if unnamed:
+                return {**result, "status": "save_as_required", "documents": unnamed,
+                        "message": "Save unnamed documents with an explicit path before closing. No documents were closed."}
+            failures = []
+            for doc, state in targets:
+                if not state["modified"]:
+                    continue
+                try:
+                    if not save_document(doc):
+                        failures.append({**state, "reason": "save_failed"})
+                    else:
+                        result["saved_documents"].append(state)
+                except Exception as exc:
+                    failures.append({**state, "reason": "save_failed", "message": str(exc)})
+            # 保存引用文档可能再次弄脏父装配体；必须检查所有目标而非只看 Save3 返回值。
+            result["remaining_documents"] = [_close_document_state(doc) for doc, _state in targets]
+            for state in result["remaining_documents"]:
+                if state["modified"]:
+                    if not any(_close_document_key(f) == _close_document_key(state) for f in failures):
+                        failures.append({**state, "reason": "still_modified"})
+            if failures:
+                return {**result, "status": "save_failed", "failures": failures,
+                        "message": "Saving was not completed. No documents were closed."}
+            if not params.close_all:
+                # 保存活动零件也可能弄脏隐藏的父装配体，关闭前再次验证连带风险。
+                at_risk = [
+                    state for state in (_close_document_state(doc) for doc in documents)
+                    if _close_document_key(state) != target_key and not state["visible"]
+                    and (state["modified"] or not state["path"])
+                ]
+                if at_risk:
+                    return {**result, "status": "blocked", "reason": "hidden_documents_at_risk",
+                            "documents": at_risk,
+                            "message": "Saving modified hidden documents. No documents were closed; save those documents first."}
+
+        close_error = None
+        try:
+            if params.close_all:
+                # 参数是 IncludeUnsaved，不是 SaveChanges。保存模式禁止关闭新变脏的文档。
+                if not sw.CloseAllDocuments(not params.save_changes):
+                    close_error = "CloseAllDocuments returned false."
+            else:
+                sw.CloseDoc(target_state["title"])
+        except Exception as exc:
+            close_error = str(exc)
+
+        try:
+            after = [_close_document_state(doc) for doc in (get_com_member(sw, "GetDocuments") or ())]
+        except Exception as exc:
+            # 关闭可能已经发生，不把无法核实的结果误报为成功或未执行。
+            return {**result, "status": "close_unverified", "closed": None,
+                    "closed_documents": None, "remaining_documents": None,
+                    "message": str(exc), "close_error": close_error}
+        after_by_key = {_close_document_key(state): state for state in after}
+        closed = []
+        remaining = []
+        for _doc, state in targets:
+            current = after_by_key.get(_close_document_key(state))
+            # 被其它文档引用的模型可在窗口关闭后继续加载，此时仍应说明保留在内存中。
+            if current is None or (not params.close_all and state["visible"] and not current["visible"]):
+                closed.append(state)
+            else:
+                remaining.append(current)
+        result["closed_documents"] = closed
+        result["remaining_documents"] = after if params.close_all else remaining
+        result["closed"] = [state["title"] for state in closed]
+        if not params.close_all:
+            result["also_closed_documents"] = [
+                state for state in states
+                if _close_document_key(state) != target_key and _close_document_key(state) not in after_by_key
+            ]
+            if not remaining:
+                result["retained_in_memory"] = target_key in after_by_key
+        if close_error or result["remaining_documents"]:
+            result["status"] = "close_failed"
+            result["message"] = close_error or "Some documents remain open."
+        else:
+            result["closed"] = "all" if params.close_all else target_state["title"]
+        return result
 
     return _run_locked(op, params.response_format)
 
@@ -2283,7 +2414,9 @@ def solidworks_pack_and_go_tool(params: SolidWorksPackAndGoInput) -> str:
             overwrite=params.overwrite,
             fallback_policy=params.fallback_policy,
         )
-        result["document"] = _model_summary(model)
+        # 超时后 COM 仍可能被原调用占用，不能再发起同步读取而重新卡住 MCP 响应。
+        if result.get("error_code") != "SW_PACK_AND_GO_TIMEOUT":
+            result["document"] = _model_summary(model)
         return result
 
     return _run_locked(op, params.response_format)

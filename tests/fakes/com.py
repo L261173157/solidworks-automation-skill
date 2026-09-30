@@ -132,13 +132,14 @@ def make_fake_win32com(client_module):
     return _make_module("win32com", client=client_module)
 
 
-INSTALLABLE_MODULES = ("pythoncom", "pywintypes", "win32com", "win32com.client")
+INSTALLABLE_MODULES = ("pythoncom", "pywintypes", "win32com", "win32com.client", "comtypes")
 
 
 def install() -> dict:
     """把伪 COM 模块注入 sys.modules (替换已存在的真实模块), 幂等。"""
     client = make_fake_win32com_client()
     stubs = {
+        "comtypes": _make_module("comtypes"),
         "pythoncom": make_fake_pythoncom(),
         "pywintypes": make_fake_pywintypes(),
         "win32com": make_fake_win32com(client),
@@ -149,5 +150,5 @@ def install() -> dict:
     }
     for name, module in stubs.items():
         sys.modules[name] = module
-    # comtypes 若真实存在则保留; 伪模式的核心是无 SolidWorks 会话, 而非无 comtypes。
+    # 明确启用的 fake 模式也隔离 comtypes，避免非 Windows 测试触发安装提示。
     return stubs

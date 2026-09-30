@@ -1,11 +1,11 @@
 use notify::{RecursiveMode, Watcher};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 use serde_json::{json, Value};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::Mutex;
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use std::{
     fs,
     fs::OpenOptions,
@@ -1236,27 +1236,59 @@ fn terminate_process_tree(child: &mut Child) -> Result<std::process::ExitStatus,
     child.wait().map_err(|error| error.to_string())
 }
 
+// 持续排空两个管道，但只保留有限输出，避免管道死锁和无限内存增长。
+fn drain_command_pipe(
+    pipe: impl Read + Send + 'static,
+) -> std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let mut pipe = pipe;
+        let mut bytes = Vec::new();
+        let result = (|| {
+            pipe.by_ref().take(1024 * 1024).read_to_end(&mut bytes)?;
+            std::io::copy(&mut pipe, &mut std::io::sink())?;
+            Ok(bytes)
+        })();
+        let _ = sender.send(result);
+    });
+    receiver
+}
+
 fn command_output_with_timeout(command: &mut Command, timeout: Duration) -> Result<Output, String> {
     let label = command.get_program().to_string_lossy().to_string();
+    let deadline = Instant::now() + timeout;
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut child = command
         .spawn()
         .map_err(|error| format!("启动 {label} 失败: {error}"))?;
-    match child
-        .wait_timeout(timeout)
-        .map_err(|error| format!("等待 {label} 失败: {error}"))?
-    {
-        Some(_) => child
-            .wait_with_output()
-            .map_err(|error| format!("读取 {label} 输出失败: {error}")),
-        None => {
+    let stdout = drain_command_pipe(child.stdout.take().expect("piped stdout"));
+    let stderr = drain_command_pipe(child.stderr.take().expect("piped stderr"));
+    let status = match child.wait_timeout(deadline.saturating_duration_since(Instant::now())) {
+        Ok(Some(status)) => status,
+        Ok(None) => {
             let _ = terminate_process_tree(&mut child);
-            Err(format!(
+            return Err(format!(
                 "{label} 检测超过 {} 秒，进程已终止。",
                 timeout.as_secs()
-            ))
+            ));
         }
-    }
+        Err(error) => {
+            let _ = terminate_process_tree(&mut child);
+            return Err(format!("等待 {label} 失败: {error}"));
+        }
+    };
+    // 子进程退出后，后代可能仍持有管道；读取也必须服从同一个截止时间。
+    let read_output = |receiver: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>| {
+        receiver
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|error| format!("读取 {label} 输出超时或失败: {error}"))?
+            .map_err(|error| format!("读取 {label} 输出失败: {error}"))
+    };
+    Ok(Output {
+        status,
+        stdout: read_output(stdout)?,
+        stderr: read_output(stderr)?,
+    })
 }
 
 fn read_worker_health(app: &AppHandle) -> Option<Value> {
@@ -1339,14 +1371,15 @@ fn detected_skill_root(app: &AppHandle, requested: Option<&str>) -> Result<PathB
 fn command_summary_with_prefix(command: &(String, Vec<String>), args: &[&str]) -> Value {
     // CWE-78: 子进程仅接受白名单命令名，或无 ".." 穿越段的绝对路径可执行文件
     // （local_agent_command 各构造分支只产出这两类来源）。
-    if !matches!(
+    let trusted_name = matches!(
         command.0.as_str(),
         "python" | "py" | "node" | "node.exe" | "codex" | "codex.exe"
-    ) && !(Path::new(&command.0).is_absolute()
+    );
+    let trusted_path = Path::new(&command.0).is_absolute()
         && !Path::new(&command.0)
             .components()
-            .any(|component| matches!(component, std::path::Component::ParentDir)))
-    {
+            .any(|component| matches!(component, std::path::Component::ParentDir));
+    if !(trusted_name || trusted_path) {
         return json!({
             "ok": false,
             "message": format!("拒绝不受信任的外部程序: {}", command.0)
@@ -2997,6 +3030,58 @@ mod tests {
     use rusqlite::{params, Connection};
     use serde_json::json;
     use std::path::Path;
+
+    #[test]
+    #[ignore = "subprocess fixture for pipe drainage"]
+    fn noisy_command_fixture() {
+        use std::io::Write;
+        let block = vec![b'x'; 8192];
+        for _ in 0..256 {
+            std::io::stdout().write_all(&block).unwrap();
+            std::io::stderr().write_all(&block).unwrap();
+        }
+    }
+
+    #[test]
+    fn command_drains_noisy_stdout_and_stderr_before_waiting() {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "tests::noisy_command_fixture",
+            "--ignored",
+            "--nocapture",
+        ]);
+        let output =
+            super::command_output_with_timeout(&mut command, std::time::Duration::from_secs(15))
+                .unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout.len(), 1024 * 1024);
+        assert_eq!(output.stderr.len(), 1024 * 1024);
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture for deadline"]
+    fn sleeping_command_fixture() {
+        std::thread::sleep(std::time::Duration::from_secs(60));
+    }
+
+    #[test]
+    fn command_deadline_still_terminates_hung_child() {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command.args([
+            "--exact",
+            "tests::sleeping_command_fixture",
+            "--ignored",
+            "--nocapture",
+        ]);
+        let start = std::time::Instant::now();
+        assert!(super::command_output_with_timeout(
+            &mut command,
+            std::time::Duration::from_millis(100)
+        )
+        .is_err());
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
+    }
 
     fn queued_job() -> serde_json::Value {
         json!({
