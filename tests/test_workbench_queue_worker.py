@@ -200,6 +200,7 @@ def test_artifact_ledger_records_output_hash(tmp_path: Path) -> None:
     project_dir = tmp_path / "project"
     output_path = project_dir / "outputs" / "delivery.txt"
     job = _queued_job("job-ledger")
+    job["capabilities"] = ["part_and_features"]
     job["projectPath"] = str(project_dir)
     write_job(job_path, job)
 
@@ -228,6 +229,7 @@ def test_reviewer_gate_passes_known_cad_file_signatures(tmp_path: Path) -> None:
     project_dir = tmp_path / "project"
     outputs_dir = project_dir / "outputs"
     job = _queued_job("job-cad-signatures")
+    job["capabilities"] = ["part_and_features"]
     job["projectPath"] = str(project_dir)
     write_job(job_path, job)
 

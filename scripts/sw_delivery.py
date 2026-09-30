@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,35 @@ SW_DOC_TYPES = {
     ".sldasm": 2,
     ".slddrw": 3,
 }
+PACK_WORKER_TIMEOUT_SECONDS = 120
+PACK_WORKER_CLEANUP_TIMEOUT_SECONDS = 5
+
+
+class PackAndGoWorkerTimeout(RuntimeError):
+    """隔离 worker 超时；保留期限和本次子进程清理结果。"""
+
+    code = "SW_PACK_AND_GO_TIMEOUT"
+    stage = "save"
+
+    def __init__(self, timeout_seconds: float, worker_cleanup: dict[str, Any]):
+        self.timeout_seconds = timeout_seconds
+        self.worker_cleanup = worker_cleanup
+        super().__init__(f"[{self.code}] comtypes worker 超时（{timeout_seconds}s）")
+
+
+def _stop_pack_worker(worker) -> dict[str, Any]:
+    """只终止本次启动的 Python worker，并有界等待回收；不终止 CAD 进程。"""
+    cleanup = {"pid": worker.pid, "terminated": False, "errors": []}
+    try:
+        worker.kill()
+    except OSError as exc:
+        cleanup["errors"].append(f"kill: {exc}")
+    try:
+        worker.wait(timeout=PACK_WORKER_CLEANUP_TIMEOUT_SECONDS)
+        cleanup["terminated"] = True
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        cleanup["errors"].append(f"wait: {exc}")
+    return cleanup
 
 
 def _file_signature(path: Path):
@@ -889,6 +919,7 @@ def _comtypes_pack_and_go(
     (RPC_E_DISCONNECTED)，pack_and_go 之后同进程内的任何 COM 调用都会以
     AttributeError 假象失败（真机复现于 SW2024 SP5）。真实 COM 调用因此被
     移入独立子进程 (``sw_delivery_comtypes_worker.py``)，父进程不受影响。
+    子进程最多等待 PACK_WORKER_TIMEOUT_SECONDS 秒，超时后仅清理该 worker。
     """
     if os.environ.get("CADSTUDIO_PACK_WORKER") == "1":
         return _comtypes_pack_and_go_impl(
@@ -915,17 +946,33 @@ def _comtypes_pack_and_go(
         "dependencies": dependencies,
     }
     worker_script = Path(__file__).resolve().parent / "sw_delivery_comtypes_worker.py"
-    completed = subprocess.run(
-        [sys.executable, str(worker_script)],
-        input=json.dumps(payload, ensure_ascii=False),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        cwd=str(Path(__file__).resolve().parent.parent),
-    )
-    stdout = (completed.stdout or "").strip()
-    if completed.returncode != 0:
-        detail = (completed.stderr or stdout or f"exit={completed.returncode}")[-500:]
+    # 临时文件避免 Windows communicate 的管道读取线程在子孙进程持有句柄时
+    # 超时后仍阻塞。不要使用 Popen 上下文管理器，其退出会无期限 wait。
+    with tempfile.TemporaryFile() as stdin, tempfile.TemporaryFile() as stdout_file, tempfile.TemporaryFile() as stderr_file:
+        stdin.write(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        stdin.seek(0)
+        worker = subprocess.Popen(
+            [sys.executable, str(worker_script)],
+            stdin=stdin,
+            stdout=stdout_file,
+            stderr=stderr_file,
+            cwd=str(Path(__file__).resolve().parent.parent),
+            close_fds=True,
+        )
+        try:
+            returncode = worker.wait(timeout=PACK_WORKER_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as exc:
+            cleanup = _stop_pack_worker(worker)
+            raise PackAndGoWorkerTimeout(PACK_WORKER_TIMEOUT_SECONDS, cleanup) from exc
+        except BaseException:
+            _stop_pack_worker(worker)
+            raise
+        stdout_file.seek(0)
+        stderr_file.seek(0)
+        stdout = stdout_file.read().decode("utf-8", errors="replace").strip()
+        stderr = stderr_file.read().decode("utf-8", errors="replace")
+    if returncode != 0:
+        detail = (stderr or stdout or f"exit={returncode}")[-500:]
         raise RuntimeError(f"comtypes worker 子进程失败: {detail}")
     try:
         decoded = json.loads(stdout.splitlines()[-1])
@@ -1065,7 +1112,7 @@ def pack_and_go(
         include_suppressed=include_suppressed,
     )
     fallback_errors = []
-    native_error: str | None = None
+    worker_timeout: PackAndGoWorkerTimeout | None = None
     result: dict[str, Any]
     try:
         extension = _model_doc_extension(model)
@@ -1095,7 +1142,8 @@ def pack_and_go(
             )
         except Exception as comtypes_exc:
             fallback_errors.append(f"comtypes: {comtypes_exc}")
-            native_error = str(comtypes_exc)
+            if isinstance(comtypes_exc, PackAndGoWorkerTimeout):
+                worker_timeout = comtypes_exc
             result = {
                 "backend": "native_unavailable",
                 "document_count": 0,
@@ -1127,7 +1175,19 @@ def pack_and_go(
     )
     staged = None
     native_status = "pass" if success else "blocked" if (missing_dependencies or native_audit["blocking_error_codes"]) and result["status_codes"] and all(code == 0 for code in result["status_codes"]) else "failed"
-    if success:
+    if worker_timeout is not None:
+        # 结束 Python worker 不保证共享 SolidWorks 中的保存已取消，不能继续
+        # 暂存、重试或将部分文件标成有效交付物；由用户确认 CAD 状态后再操作。
+        status = "failed"
+        stage = worker_timeout.stage
+        error_code = worker_timeout.code
+        retryable = False
+        manual_review_required = True
+        limitations = [
+            "comtypes worker 超时；仅尝试清理本次 Python 子进程，未终止 SolidWorks",
+            "SolidWorks 可能仍在保存，目标目录可能有未完成文件；确认应用状态并人工复核后再重试",
+        ]
+    elif success:
         status = "pass"
         stage = "save"
         error_code = None
@@ -1266,6 +1326,11 @@ def pack_and_go(
         "fallback_used": staged is not None,
         "manifest": result.get("manifest"),
         "fallback_errors": fallback_errors,
+        **({
+            "error": str(worker_timeout),
+            "timeout_seconds": worker_timeout.timeout_seconds,
+            "worker_cleanup": worker_timeout.worker_cleanup,
+        } if worker_timeout is not None else {}),
         "options": {
             "include_drawings": include_drawings,
             "include_simulation_results": include_simulation_results,

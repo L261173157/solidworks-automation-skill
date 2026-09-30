@@ -1076,7 +1076,7 @@ def main(argv: list[str] | None = None) -> int:
         profiles=args.profile,
         brep_evidence=args.brep_evidence,
     )
-    print(json.dumps(result, ensure_ascii=False, indent=2))
+    print(json.dumps(result, ensure_ascii=True, indent=2))
     return 1 if result.get("status") in {"blocked", "failed"} else 0
 
 

@@ -185,19 +185,19 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "doctor":
         result = run_doctor()
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(result, ensure_ascii=True, indent=2))
         return 1 if result["summary"]["status"] == "error" else 0
     if args.command == "status":
         jobs = _queue_jobs(args.queue_dir)
         if args.job_id:
             jobs = [job for job in jobs if job.get("id") == args.job_id]
-        print(json.dumps({"queueDir": args.queue_dir.name, "jobs": jobs}, ensure_ascii=False, indent=2))
+        print(json.dumps({"queueDir": args.queue_dir.name, "jobs": jobs}, ensure_ascii=True, indent=2))
         return 0 if jobs or not args.job_id else 1
     if args.command == "run":
         from cad_workbench.queue_worker import build_handlers
 
         processed = process_queue(args.queue_dir, limit=args.limit, handlers=build_handlers(enable_mock=args.enable_mock))
-        print(json.dumps({"processed": processed}, ensure_ascii=False, indent=2))
+        print(json.dumps({"processed": processed}, ensure_ascii=True, indent=2))
         return 0
     if args.command in {"retry", "cancel"}:
         path = _job_path(args.queue_dir, args.job_id)
@@ -213,17 +213,17 @@ def main(argv: list[str] | None = None) -> int:
             job.update({"status": "cancelled", "cancelRequested": True, "updatedAt": now, "lastMessage": "已请求取消任务。"})
             cancel_marker_path(path).touch()
         write_job(path, job)
-        print(json.dumps(job, ensure_ascii=False, indent=2))
+        print(json.dumps(job, ensure_ascii=True, indent=2))
         return 0
     if args.command == "export-diagnostics":
         path = create_diagnostic_bundle(args.output)
-        print(json.dumps({"status": "created", "path": path.name}, ensure_ascii=False))
+        print(json.dumps({"status": "created", "path": path.name}, ensure_ascii=True))
         return 0
     if args.command == "write-open-format":
         from headless_cad_writer import export_headless
 
         result = export_headless(args.input, args.out_dir, args.formats)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(result, ensure_ascii=True, indent=2))
         return 0 if result.get("status") in {"pass", "pilot"} else 1
     if args.command == "preview-dxf":
         from dxf_preview_scene import dxf_to_preview_scene
@@ -243,25 +243,25 @@ def main(argv: list[str] | None = None) -> int:
         from dfm_review import write_dfm_report
 
         result = write_dfm_report(args.input, args.output, process=args.process, profiles=args.profile, brep_evidence=args.brep_evidence)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(result, ensure_ascii=True, indent=2))
         return 1 if result.get("status") in {"blocked", "failed"} else 0
     if args.command == "check-routing":
         from routing_review import review_routing_file
 
         result = review_routing_file(args.input, args.output)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(result, ensure_ascii=True, indent=2))
         return 1 if result.get("status") in {"blocked", "failed"} else 0
     if args.command == "routing-preflight":
         from routing_review import probe_solidworks_routing
 
         result = probe_solidworks_routing()
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(result, ensure_ascii=True, indent=2))
         return 1 if result.get("status") in {"blocked", "failed"} else 0
     if args.command == "fea-preflight":
         from fea_analysis import discover_solver
 
         result = discover_solver(args.solver)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(result, ensure_ascii=True, indent=2))
         return 1 if result.get("status") in {"blocked", "failed"} else 0
     if args.command == "prepare-fea":
         from fea_analysis import build_calculix_input, validate_analysis
@@ -284,37 +284,37 @@ def main(argv: list[str] | None = None) -> int:
         else:
             args.out_dir.mkdir(parents=True, exist_ok=True)
             result = build_calculix_input(request, args.out_dir / f"{request['analysisId']}.inp")
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(result, ensure_ascii=True, indent=2))
         return 1 if result.get("status") in {"blocked", "failed"} else 0
     if args.command == "run-fea":
         from fea_analysis import run_analysis
 
         result = run_analysis(args.input, args.out_dir, timeout_seconds=args.timeout)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(result, ensure_ascii=True, indent=2))
         return 1 if result.get("status") in {"blocked", "failed"} else 0
     if args.command == "run-fea-convergence":
         from fea_convergence import run_convergence_study
 
         result = run_convergence_study(args.input, args.out_dir, timeout_seconds_per_case=max(1, min(args.timeout_per_case, 86400)))
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(result, ensure_ascii=True, indent=2))
         return 1 if result.get("status") in {"blocked", "failed"} else 0
     if args.command == "review-advanced-geometry":
         from advanced_geometry import write_preflight_report
 
         result = write_preflight_report(args.input, args.output)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(result, ensure_ascii=True, indent=2))
         return 1 if result.get("status") in {"blocked", "failed"} else 0
     if args.command == "create-ocp-loft":
         from advanced_geometry_ocp import execute_ocp_loft
 
         result = execute_ocp_loft(args.input, args.out_dir)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(result, ensure_ascii=True, indent=2))
         return 1 if result.get("status") in {"blocked", "failed"} else 0
     if args.command == "create-ocp-surface":
         from advanced_surface_ocp import execute_advanced_surface
 
         result = execute_advanced_surface(args.input, args.out_dir)
-        print(json.dumps(result, ensure_ascii=False, indent=2))
+        print(json.dumps(result, ensure_ascii=True, indent=2))
         return 1 if result.get("status") in {"blocked", "failed"} else 0
     if args.command == "create-drawing":
         from sw_connect import connect_solidworks, open_document
@@ -363,7 +363,7 @@ def main(argv: list[str] | None = None) -> int:
             }
             plan = plan_manufacturing_drawing(evidence, frame_spec, {"grade": args.grade})
         if plan.get("status") == "blocked":
-            print(json.dumps({"status": "blocked", "plan": plan}, ensure_ascii=False, indent=2, default=str))
+            print(json.dumps({"status": "blocked", "plan": plan}, ensure_ascii=True, indent=2, default=str))
             return 1
         sw, _model = connect_solidworks()
         execution = generate_manufacturing_drawing(sw, plan, args.out_dir)
@@ -376,7 +376,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         result = {"status": execution["status"], "plan_status": plan.get("status"),
                   "execution": execution, "review": review}
-        print(json.dumps(result, ensure_ascii=False, indent=2, default=str))
+        print(json.dumps(result, ensure_ascii=True, indent=2, default=str))
         return 1 if execution.get("status") in {"blocked", "failed"} else 0
     return 2
 

@@ -37,9 +37,13 @@ jobs:
       - name: Run Python tests
         run: |
           python -m pytest -q
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/validate_skill.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/validate_mcp.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/release_check.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Run fake-COM smoke tests (no SolidWorks required)
         env:
           CADSTUDIO_FAKE_COM: "1"
@@ -51,13 +55,18 @@ jobs:
         working-directory: apps/workbench-ui
         run: |
           npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           npm run build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Test Rust backend
         working-directory: apps/workbench-ui/src-tauri
         run: |
           cargo fmt -- --check
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo clippy -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Configure updater signing key
         working-directory: apps/workbench-ui
         env:
@@ -93,7 +102,9 @@ jobs:
       - name: Test portable and installer packages
         run: |
           node ai_team/release-portable-e2e.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell -NoProfile -File ai_team/nsis-install-e2e.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v7
         with:
           name: cad-studio-windows-x64

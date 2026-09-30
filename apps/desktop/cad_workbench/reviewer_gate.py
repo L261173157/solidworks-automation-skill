@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import struct
 from pathlib import Path
 from typing import Any
 
@@ -31,10 +32,15 @@ def review_path_for(queue_dir: Path, job_id: Any) -> Path:
     return review_dir(queue_dir) / f"{safe_job_id(job_id)}.review.json"
 
 
-def _read_file_sample(path: Path, limit: int = 1024 * 1024) -> bytes:
-    """@brief 读取文件开头样本，避免为了格式检查加载超大 CAD 文件。"""
+def _read_file_samples(path: Path, limit: int = 1024 * 1024) -> tuple[bytes, bytes, int]:
+    """@brief 有界读取文件头尾及实际长度，支持大型 CAD 文件的结束标记检查。"""
     with Path(path).open("rb") as handle:
-        return handle.read(limit)
+        sample = handle.read(limit)
+        size = handle.seek(0, 2)
+        if size <= limit:
+            return sample, sample, size
+        handle.seek(max(0, size - limit))
+        return sample, handle.read(limit), size
 
 
 def _artifact_extension(kind: str, path: Path) -> str:
@@ -57,12 +63,24 @@ def validate_known_format(kind: str, path: Path) -> dict[str, Any] | None:
     if extension not in KNOWN_FORMAT_EXTENSIONS:
         return None
 
-    sample = _read_file_sample(path)
-    text = _text_sample(sample)
     check_id = f"artifact-format-{kind}"
+    try:
+        sample, tail, size = _read_file_samples(path)
+    except OSError as error:
+        return {
+            "id": check_id,
+            "severity": "P0",
+            "status": "fail",
+            "message": f"无法读取交付物进行格式检查: {path}；{error}",
+        }
+    text = _text_sample(sample)
+    tail_text = _text_sample(tail)
 
     if extension in {".step", ".stp"}:
-        valid = "ISO-10303-21" in text and "END-ISO-10303-21" in text
+        valid = bool(
+            re.match(r"\s*ISO-10303-21\s*;", text.lstrip("\ufeff"))
+            and re.search(r"END-ISO-10303-21\s*;\s*\Z", tail_text)
+        )
         return {
             "id": check_id,
             "severity": "P0",
@@ -71,8 +89,15 @@ def validate_known_format(kind: str, path: Path) -> dict[str, Any] | None:
         }
 
     if extension == ".stl":
-        ascii_valid = text.lstrip().startswith("SOLID") and "ENDSOLID" in text
-        binary_valid = len(sample) >= 84 and not text.lstrip().startswith("SOLID")
+        ascii_valid = bool(
+            b"\x00" not in sample
+            and b"\x00" not in tail
+            and re.match(r"\s*SOLID(?:\s|$)", text)
+            and re.search(r"(?:^|[\r\n])[ \t]*ENDSOLID(?:[ \t]+[^\r\n]*)?\s*\Z", tail_text)
+        )
+        # 二进制 STL 头可以以 solid 开头；唯一可靠的轻量判断是面片数与文件长度一致。
+        triangle_count = struct.unpack_from("<I", sample, 80)[0] if len(sample) >= 84 else 0
+        binary_valid = triangle_count > 0 and size == 84 + triangle_count * 50
         valid = ascii_valid or binary_valid
         return {
             "id": check_id,
@@ -82,7 +107,10 @@ def validate_known_format(kind: str, path: Path) -> dict[str, Any] | None:
         }
 
     if extension == ".dxf":
-        valid = "SECTION" in text and text.rstrip().endswith("EOF")
+        valid = bool(
+            re.search(r"(?:^|[\r\n])[ \t]*0[ \t]*[\r\n]+[ \t]*SECTION[ \t]*(?:[\r\n]|$)", text)
+            and re.search(r"(?:^|[\r\n])[ \t]*0[ \t]*[\r\n]+[ \t]*EOF\s*\Z", tail_text)
+        )
         return {
             "id": check_id,
             "severity": "P0",
@@ -299,19 +327,30 @@ def _spec_conformance_checks(ledger: dict[str, Any], artifacts: list[dict[str, A
     return checks
 
 
-def evaluate_ledger(ledger: dict[str, Any]) -> dict[str, Any]:
+def evaluate_ledger(
+    ledger: dict[str, Any], *, capability_review_reasons: list[str] | None = None
+) -> dict[str, Any]:
     """@brief 根据账本内容生成交付物复核结论。"""
     artifacts = ledger.get("artifacts") if isinstance(ledger.get("artifacts"), list) else []
     checks: list[dict[str, Any]] = []
+    # 新旧任务类型共用门禁，不能通过省略 executor 或切换 Provider 绕过本轮证据要求。
+    agent_execution = ledger.get("executor") in {"codex", "agent"} or ledger.get("kind") in {"codex_task", "agent_task"}
+    if capability_review_reasons:
+        checks.append({
+            "id": "capability-declaration-review",
+            "severity": "P1",
+            "status": "warning",
+            "message": "能力声明不完整，必须人工复核后交付: " + "；".join(capability_review_reasons),
+        })
     delivery_artifacts = [
         artifact
         for artifact in artifacts
-        if isinstance(artifact, dict) and str(artifact.get("kind") or "") != "codex_output"
+        if isinstance(artifact, dict) and str(artifact.get("kind") or "") not in {"codex_output", "agent_output"}
     ]
     checks.extend(_spec_conformance_checks(ledger, delivery_artifacts))
 
     verification = ledger.get("verification") if isinstance(ledger.get("verification"), list) else []
-    if ledger.get("executor") == "codex" and not verification:
+    if agent_execution and not verification:
         checks.append(
             {
                 "id": "executor-verification-present",
@@ -322,6 +361,12 @@ def evaluate_ledger(ledger: dict[str, Any]) -> dict[str, Any]:
         )
     for index, item in enumerate(verification):
         if not isinstance(item, dict):
+            checks.append({
+                "id": f"executor-verification-{index}",
+                "severity": "P0",
+                "status": "fail",
+                "message": "执行器验证记录格式无效，无法作为通过证据。",
+            })
             continue
         status = str(item.get("status") or "skipped")
         review_status = "pass" if status == "passed" else "warning" if status == "skipped" else "fail"
@@ -365,9 +410,9 @@ def evaluate_ledger(ledger: dict[str, Any]) -> dict[str, Any]:
         for artifact in delivery_artifacts:
             if Path(str(artifact.get("path") or "")).suffix.lower() not in expected_extensions:
                 continue
-            if artifact.get("exists") is not True:
+            if artifact.get("exists") is not True or artifact.get("isDirectory") is True:
                 continue
-            if ledger.get("executor") == "codex" and artifact.get("producedThisRun") is not True:
+            if agent_execution and artifact.get("producedThisRun") is not True:
                 continue
             matching.append(artifact)
         checks.append(
@@ -388,7 +433,8 @@ def evaluate_ledger(ledger: dict[str, Any]) -> dict[str, Any]:
         for artifact in delivery_artifacts
         if Path(str(artifact.get("path") or "")).suffix.lower() in cad_extensions
         and artifact.get("exists") is True
-        and (ledger.get("executor") != "codex" or artifact.get("producedThisRun") is True)
+        and artifact.get("isDirectory") is not True
+        and (not agent_execution or artifact.get("producedThisRun") is True)
     ]
     target = str(ledger.get("target") or "")
     expects_non_cad = "调研报告" in expected_output or "Skills" in target or "规范" in target
@@ -481,9 +527,11 @@ def evaluate_ledger(ledger: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def write_reviewer_gate(queue_dir: Path, ledger: dict[str, Any]) -> dict[str, Any]:
+def write_reviewer_gate(
+    queue_dir: Path, ledger: dict[str, Any], *, capability_review_reasons: list[str] | None = None
+) -> dict[str, Any]:
     """@brief 写入 Reviewer Gate 报告并返回报告对象。"""
-    review = evaluate_ledger(ledger)
+    review = evaluate_ledger(ledger, capability_review_reasons=capability_review_reasons)
     path = review_path_for(queue_dir, ledger.get("jobId"))
     path.write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
     review["reviewPath"] = str(path)
