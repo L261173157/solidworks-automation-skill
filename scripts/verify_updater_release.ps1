@@ -1,8 +1,21 @@
 param(
-    [string]$ReleaseRoot = ""
+    [string]$ReleaseRoot = "",
+    [string]$TestPublicKey = $env:CAD_STUDIO_TEST_UPDATER_PUBLIC_KEY
 )
 
 $ErrorActionPreference = "Stop"
+$isTestSigning = $env:CAD_STUDIO_UPDATER_SIGNING_MODE -eq "ci-test"
+if (-not [string]::IsNullOrWhiteSpace($TestPublicKey)) {
+    if (-not $isTestSigning -or $env:GITHUB_ACTIONS -ne "true" -or $env:GITHUB_REF -notmatch '^refs/(heads|pull)/') {
+        throw "Test updater public keys are restricted to non-release branch/PR CI runs."
+    }
+}
+elseif ($isTestSigning) {
+    throw "CI test signing requires its matching temporary updater public key."
+}
+if ($env:CAD_STUDIO_UPDATER_SIGNING_MODE -and $env:CAD_STUDIO_UPDATER_SIGNING_MODE -notin @("production", "ci-test")) {
+    throw "Unknown updater signing mode."
+}
 $repoRoot = Split-Path -Parent $PSScriptRoot
 if ([string]::IsNullOrWhiteSpace($ReleaseRoot)) {
     $ReleaseRoot = Join-Path $repoRoot "release-output"
@@ -11,6 +24,10 @@ $resolvedReleaseRoot = [System.IO.Path]::GetFullPath($ReleaseRoot)
 $expectedReleaseRoot = [System.IO.Path]::GetFullPath((Join-Path $repoRoot "release-output"))
 if ($resolvedReleaseRoot -ne $expectedReleaseRoot) {
     throw "Unsafe updater verification path: $resolvedReleaseRoot"
+}
+$testMarkerPath = Join-Path $resolvedReleaseRoot "CI-TEST-ONLY.txt"
+if ($isTestSigning -ne (Test-Path -LiteralPath $testMarkerPath -PathType Leaf)) {
+    throw "CI test artifacts must be explicitly marked and cannot be verified as production releases."
 }
 
 $tauriRoot = Join-Path $repoRoot "apps\workbench-ui\src-tauri"
@@ -45,7 +62,10 @@ if ([string]$platform.signature -ne $signature) {
 $publicKeyPath = Join-Path $env:TEMP "cad-studio-updater-public-$PID.key"
 $decodedSignaturePath = Join-Path $env:TEMP "cad-studio-updater-signature-$PID.sig"
 try {
-    $publicKeyBytes = [Convert]::FromBase64String([string]$tauriConfig.plugins.updater.pubkey)
+    # Production always uses the application's unchanged, embedded trust root.
+    $verificationPublicKey = [string]$tauriConfig.plugins.updater.pubkey
+    if ($isTestSigning) { $verificationPublicKey = $TestPublicKey }
+    $publicKeyBytes = [Convert]::FromBase64String($verificationPublicKey)
     [System.IO.File]::WriteAllBytes($publicKeyPath, $publicKeyBytes)
     $signatureBytes = [Convert]::FromBase64String($signature)
     [System.IO.File]::WriteAllBytes($decodedSignaturePath, $signatureBytes)
@@ -65,4 +85,9 @@ foreach ($artifact in Get-ChildItem -LiteralPath $resolvedReleaseRoot -File | Wh
     }
 }
 
-Write-Host "Updater release contract verified for CAD Studio $version."
+if ($isTestSigning) {
+    Write-Host "CI-only updater contract verified for CAD Studio $version; artifacts are NOT production-trusted."
+}
+else {
+    Write-Host "Updater release contract verified for CAD Studio $version."
+}

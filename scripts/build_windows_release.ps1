@@ -4,6 +4,16 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$isTestSigning = $env:CAD_STUDIO_UPDATER_SIGNING_MODE -eq "ci-test"
+if ($isTestSigning -and ($env:GITHUB_ACTIONS -ne "true" -or $env:GITHUB_REF -notmatch '^refs/(heads|pull)/' -or [string]::IsNullOrWhiteSpace($env:CAD_STUDIO_TEST_UPDATER_PUBLIC_KEY))) {
+    throw "CI test packages require a temporary public key and a non-release branch/PR CI run."
+}
+if (-not $isTestSigning -and -not [string]::IsNullOrWhiteSpace($env:CAD_STUDIO_TEST_UPDATER_PUBLIC_KEY)) {
+    throw "Test updater public keys cannot be used for production packages."
+}
+if ($env:CAD_STUDIO_UPDATER_SIGNING_MODE -and $env:CAD_STUDIO_UPDATER_SIGNING_MODE -notin @("production", "ci-test")) {
+    throw "Unknown updater signing mode."
+}
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $syncScript = Join-Path $PSScriptRoot "sync_bundled_skill.py"
 & python $syncScript
@@ -107,7 +117,13 @@ $latestPath = Join-Path $releaseRoot "latest.json"
 $latestJson = $latest | ConvertTo-Json -Depth 5
 [System.IO.File]::WriteAllText($latestPath, $latestJson, (New-Object System.Text.UTF8Encoding($false)))
 
-$checksums = @($setupPath, $signaturePath, $portableZip, $latestPath) | ForEach-Object {
+$checksumArtifacts = @($setupPath, $signaturePath, $portableZip, $latestPath)
+if ($isTestSigning) {
+    $testMarkerPath = Join-Path $releaseRoot "CI-TEST-ONLY.txt"
+    "NON-RELEASE CI TEST ARTIFACTS. Signed with an ephemeral test key, not trusted by the production CAD Studio updater. Do not publish as a release." | Set-Content -LiteralPath $testMarkerPath -Encoding ascii
+    $checksumArtifacts += $testMarkerPath
+}
+$checksums = $checksumArtifacts | ForEach-Object {
     $hash = Get-FileHash -Algorithm SHA256 -LiteralPath $_
     "$($hash.Hash.ToLowerInvariant())  $([System.IO.Path]::GetFileName($_))"
 }
