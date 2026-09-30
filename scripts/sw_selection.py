@@ -8,13 +8,16 @@
 - ``coordinate``: 屏幕坐标命中 (point_mm, 引擎内部转米);
 - ``component``: 组件按名称/关键字;
 - ``face`` / ``edge`` / ``vertex`` / ``sketch_segment``: 枚举拓扑候选,
-  结合名称与几何签名评分; 歧义时返回候选清单, 绝不猜测 (pilot)。
+  结合名称与几何签名评分; face/edge/vertex 还支持 point_mm 作为
+  "中点提示"评分 (候选中点距离 <= 1mm 得唯一高分, 多命中即 ambiguous);
+  歧义时返回候选清单, 绝不猜测 (pilot)。
 
 选择成功一律通过对象级 Select2/Select4 落到选择集, 并返回证据字典
 (status/kind/matched/score/candidates) 供上层审查。
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -46,6 +49,9 @@ VALID_KINDS = {
     "coordinate",
 }
 
+# face/edge/vertex 的 point_mm 中点提示容差 (米): 候选中点落在该距离内得分。
+_POINT_MIDPOINT_TOLERANCE_M = 0.001
+
 SPEC_FIELDS = {
     "kind",
     "name",
@@ -76,7 +82,8 @@ class SelectionSpec:
     name: 实体/特征/组件名称或别名 (named/plane/component/sketch_segment)
     feature: 限定候选所属特征名
     geometry_signature: 期望的几何签名 (几何匹配时校验)
-    point_mm: coordinate 形态的命中点 (毫米, 内部转米)
+    point_mm: coordinate 形态的命中点 (毫米, 内部转米);
+        face/edge/vertex 形态下作为"中点提示"评分 (候选中点距离 <= 1mm 得唯一高分)
     nth: 同类候选序号 (0 起)
     entity_type: 覆盖 SolidWorks 选择类型串 (默认按 kind 推断)
     """
@@ -170,16 +177,36 @@ def _select_by_name(extension, name: str, entity_type: str, append: bool, mark: 
 
 
 def _candidate_metadata(candidate: Any) -> dict[str, Any]:
-    """提取拓扑候选的轻量元数据 (面积/中点等), 失败字段留空。"""
+    """提取拓扑候选的轻量元数据 (面积/中点等), 成员缺失时字段留空。
+
+    face 有 GetArea/GetCenterPoint; edge 无这些成员 (SW2024 类型库实测,
+    AttributeError), 中点退化为起止顶点平均 (直线边精确, 曲线边为弦中点近似)。
+    """
     metadata: dict[str, Any] = {}
-    area = safe_get_com_member(candidate, "GetArea")
-    if area is not None:
-        metadata["area"] = round(float(area), 6)
+    try:
+        area = safe_get_com_member(candidate, "GetArea")
+        if area is not None:
+            metadata["area"] = round(float(area), 6)
+    except Exception:
+        pass
     point = None
     for getter in ("GetPointAtPoint", "GetCenterPoint"):
-        point = safe_get_com_member(candidate, getter)
+        try:
+            point = safe_get_com_member(candidate, getter)
+        except Exception:
+            point = None
         if point is not None:
             break
+    if point is None:
+        try:
+            start_vertex = safe_get_com_member(candidate, "GetStartVertex")
+            end_vertex = safe_get_com_member(candidate, "GetEndVertex")
+            if start_vertex and end_vertex:
+                start = tuple(float(v) for v in safe_get_com_member(start_vertex, "GetPoint"))
+                end = tuple(float(v) for v in safe_get_com_member(end_vertex, "GetPoint"))
+                point = tuple((start[i] + end[i]) / 2.0 for i in range(3))
+        except Exception:
+            point = None
     if point is not None:
         try:
             metadata["midpoint"] = [round(float(value), 6) for value in tuple(point)]
@@ -205,22 +232,43 @@ def _enumerate_topology(model, kind: str) -> list[Any]:
 
 
 def _score_candidates(model, spec: SelectionSpec, candidates: list[Any]) -> tuple[list[Any], list[dict[str, Any]]]:
-    """按名称/签名/序号给候选打分, 返回 (排序后候选, 候选证据)。"""
-    scored: list[tuple[int, Any, dict[str, Any]]] = []
+    """按名称/签名/中点提示/序号给候选打分, 返回 (排序后候选, 候选证据)。
+
+    match_score 是纯匹配分 (签名 +5 / 中点命中 +5), 用于资格判定;
+    排序键再减枚举序号打破平手。二者不可混用, 否则高序号的精确匹配
+    会被误判 not_found。
+    """
+    target_m = None
+    if spec.point_mm is not None:
+        target_m = [float(value) / 1000.0 for value in spec.point_mm]
+    ranked: list[tuple[int, int, Any, dict[str, Any]]] = []
     for index, candidate in enumerate(candidates):
         metadata = _candidate_metadata(candidate)
-        score = 0
+        match_score = 0
         if spec.geometry_signature:
             expected = spec.geometry_signature
             actual = geometry_signature([metadata.get("area"), metadata.get("midpoint")])
             if expected and actual == expected:
-                score += 5
-        scored.append((score - index, candidate, metadata))
-    scored.sort(key=lambda item: item[0], reverse=True)
-    ordered = [candidate for _, candidate, _ in scored]
+                match_score += 5
+        if target_m is not None and metadata.get("midpoint") is not None:
+            distance = math.dist(metadata["midpoint"], target_m)
+            metadata["midpoint_distance_m"] = round(distance, 6)
+            if distance <= _POINT_MIDPOINT_TOLERANCE_M:
+                match_score += 5
+        metadata["match_score"] = match_score
+        ranked.append((match_score, index, candidate, metadata))
+    # 匹配分优先; 同分按枚举序 (确定性)。真机教训 (SW2024 SP5): 若排序键
+    # 用 "匹配分-枚举序", fillet 改变边枚举顺序后, 晚枚举的精确匹配会输给
+    # 早枚举的不匹配, 选中错误边。
+    ranked.sort(key=lambda item: (-item[0], item[1]))
+    ordered = [candidate for _, _, candidate, _ in ranked]
     candidate_infos = [
-        {"index": index, "score": score, **metadata}
-        for index, (score, _candidate, metadata) in enumerate(scored)
+        {
+            "index": position,
+            "score": metadata["match_score"] - position,
+            **metadata,
+        }
+        for position, (_match_score, _enum_index, _candidate, metadata) in enumerate(ranked)
     ]
     return ordered, candidate_infos
 
@@ -328,10 +376,10 @@ def resolve_selection(
     if not candidates:
         return None, selection_evidence("not_found", spec, message=f"未枚举到 {spec.kind} 候选")
     ordered, candidate_infos = _score_candidates(model, spec, candidates)
-    expected_score = 5 if spec.geometry_signature else 0
-    best_score = candidate_infos[0]["score"] if candidate_infos else 0
-    ties = sum(1 for info in candidate_infos if info["score"] == best_score)
-    if spec.geometry_signature and (best_score < expected_score or ties != 1):
+    requires_unique = bool(spec.geometry_signature) or spec.point_mm is not None
+    best_match = max((info.get("match_score", 0) for info in candidate_infos), default=0)
+    ties = sum(1 for info in candidate_infos if info.get("match_score", 0) == best_match and best_match > 0)
+    if requires_unique and (best_match < 5 or ties != 1):
         return None, selection_evidence(
             "ambiguous" if ties > 1 else "not_found",
             spec,

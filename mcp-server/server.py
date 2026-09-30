@@ -1881,9 +1881,9 @@ def solidworks_compare_documents(params: SolidWorksCompareDocumentsInput) -> str
 
 
 class SolidWorksSubmitFeatureGraphInput(BaseInput):
-    """Input for submitting a Feature Graph IR v1.0 build (pilot, reviewed mode)."""
+    """Input for submitting a Feature Graph IR v1.1 build (pilot, reviewed mode)."""
 
-    ir: Dict[str, Any] = Field(..., description="Feature Graph IR v1.0 document (lengths in mm); see feature_graph.schema.json.")
+    ir: Dict[str, Any] = Field(..., description="Feature Graph IR v1.1 document (lengths in mm, angles in deg); see feature_graph.schema.json.")
     out_path: str = Field(..., min_length=1, description="Output .sldprt path.")
     overwrite: bool = Field(default=True, description="Overwrite the output file if it exists (backup rules still apply).")
     response_format: ResponseFormat = Field(default=ResponseFormat.JSON, description="Return format.")
@@ -1900,7 +1900,7 @@ class SolidWorksSubmitFeatureGraphInput(BaseInput):
     },
 )
 def solidworks_submit_feature_graph(params: SolidWorksSubmitFeatureGraphInput) -> str:
-    """Deterministically build a part from Feature Graph IR v1.0 (validate -> lower -> execute; reviewed mode only)."""
+    """Deterministically build a part from Feature Graph IR v1.1 (validate -> lower -> execute; reviewed mode only)."""
 
     def op():
         sw, _model = connect_solidworks(wait_seconds=1)

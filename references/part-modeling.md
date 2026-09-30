@@ -243,6 +243,61 @@ feature_mgr.InsertFeatureChamfer(
 3. 必须做特征圆角/倒角时，先通过 body/face/edge 枚举按几何条件过滤目标边，再选择实体对象调用特征，不要依赖临时的 `Edge1` 名称。
 4. 圆角失败应降级为保留直边模型，并在审查报告或最终说明中标注“外观圆角未应用”，不要让模型生成流程整体失败。
 
+补充真机实测 (SW2024 SP5, 2026-09-30)：`FeatureFillet` / `InsertFeatureChamfer` 的目标边用**对象级 Select2(append, mark=1)** 选择可行（`_select_com_object` 封装），边过滤按"GetCurve.IsLine + 端点坐标主方向"谓词，闭式解体积校验 0.000% 偏差。
+
+## 阵列特征 (真机查证 2026-09-30, SW2024 SP5)
+
+### FeatureLinearPattern3 (IFeatureManager, 10 参)
+
+```python
+feature = model.FeatureManager.FeatureLinearPattern3(
+    Num1,     # int: 方向 1 实例数 (含原始)
+    Spacing1, # float: 方向 1 间距 (米)
+    Num2,     # int: 方向 2 实例数 (含原始), 单方向时传 1
+    Spacing2, # float: 方向 2 间距 (米), 单方向传任意正值如 0.01
+    FlipDir1, # bool: 反转方向 1
+    FlipDir2, # bool: 反转方向 2
+    DName1,   # str: 字面量 "NULL" (官方 VB.NET 示例口径)
+    DName2,   # str: 字面量 "NULL"
+    GeometryPattern,  # bool: 几何阵列
+    VaryInstance,     # bool: 可变实例
+)
+```
+
+**方向不来自参数，来自预选**（与 `FeatureCircularPattern4` 的预选 AXIS 同构）：
+
+```python
+model.ClearSelection2(True)
+# 1) 种子特征: SelectByID2(name, "BODYFEATURE", 0,0,0, False, 4, callout, 0)  # mark 4
+# 2) 方向 1 实体: 对象级 Select2(append=True, mark=1)  # mark 1; 方向 2 用 mark 2
+#    方向实体可以是: 模型边线、基准轴、或**已消费草图中的构造中心线段**
+#    (晚绑定下用 SketchSelectionRef.sketch.GetSketchSegments 枚举,
+#     按 ConstructionGeometry == True 定位; GetType 可能恒返回 0 不可依赖,
+#     GetEntityName 对草图段返回空串, 对象级选择即可)
+```
+
+真机验证: 底板草图 (矩形 + 构造中心线) 拉伸消费后, 中心线段作方向实体,
+`FeatureLinearPattern3(4, 0.015, 1, 0.01, False, False, "NULL", "NULL", False, False)`
+创建 4 实例阵列, 改名 + ForceRebuild3 + FeatureByName 回读持久化通过, 闭式解体积校验 0.000% 偏差。
+
+坑: 旧代码按 14 参、方向传 `str(dx)`/`str(dy)`/`str(dz)` 的写法是错的
+(实际是 `FeatureLinearPattern4` 的 20 参口径且 DName 是尺寸名而非向量), 会报
+`Invalid number of parameters`。
+
+### 特征类型名与尺寸回读 (GetTypeName2 / Parameter)
+
+| type 名 | op | 可回读尺寸 (model.Parameter, SystemValue) |
+|---|---|---|
+| `"Extrusion"` / `"ICE"` | extrude_boss | `D1@<特征>` = 深度 (米) |
+| `"Cut"` | extrude_cut | 深度 |
+| `"Revolution"` | revolve_boss | `D1@<特征>` = 角度 (弧度) |
+| `"Fillet"` | fillet | `D1@<特征>` = 半径 (米) |
+| `"Chamfer"` | chamfer | `D1` = 距离 (米), `D2` = 角度 (弧度) |
+| `"LPattern"` | linear_pattern | `D1` = 方向 1 实例数 (无量纲), `D3` = 方向 1 间距 (米) |
+
+注意: `IFeature.GetDimensions` 与 `IModelDoc2.GetFirstFeature` 在 SW2024 类型库不存在
+(晚绑定 Member not found); 特征枚举用 `FirstFeature` -> `GetNextFeature` 链。
+
 ## SelectByID2 实体类型
 
 | 类型字符串 | 说明 |

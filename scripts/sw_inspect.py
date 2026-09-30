@@ -260,10 +260,11 @@ def count_components(assembly_model, flat=True):
 def enumerate_features(model, max_features=200):
     """@brief 枚举特征及驱动尺寸（只读）。
 
-    GetFirstFeature→GetNextFeature 链；feat.Name(属性)、GetTypeName2()(方法)、
-    GetDimensions()→FullName/SystemValue(属性，SystemValue 单位米->换算 mm)。
-    返回 {status, features:[{index, name, type, dimensions:[{name, value_mm}]}],
-    count, truncated}。max_features 限制枚举数；超出 truncated=True。
+    FirstFeature→GetNextFeature 链；feat.Name(属性)、GetTypeName2()(方法)、
+    尺寸回读: IFeature.GetDimensions (老版本) 或 model.Parameter("Dn@名") 探测
+    (SW2024 类型库实测无 GetDimensions)。SystemValue 单位米(或弧度)->换算 mm。
+    返回 {status, features:[{index, name, type, dimensions:[{name, value_mm,
+    system_value}]}], count, truncated}。max_features 限制枚举数；超出 truncated=True。
     """
     result = {
         "status": "failed",
@@ -279,7 +280,16 @@ def enumerate_features(model, max_features=200):
         if model is None:
             result["error_code"] = "FEAT_NO_MODEL"
             return result
-        feat = get_com_member(model, "GetFirstFeature")
+        # SW2024 类型库实测: IModelDoc2/IPartDoc 成员名是 FirstFeature,
+        # GetFirstFeature 不存在 (晚绑定 Member not found); 兼容两者。
+        feat = None
+        for member in ("FirstFeature", "GetFirstFeature"):
+            try:
+                feat = get_com_member(model, member)
+            except Exception:
+                feat = None
+            if feat is not None:
+                break
         idx = 0
         while feat is not None and idx < int(max_features):
             entry = {"index": idx, "name": "", "type": "", "dimensions": []}
@@ -293,18 +303,40 @@ def enumerate_features(model, max_features=200):
                 entry["type"] = ""
             try:
                 dims = get_com_member(feat, "GetDimensions")
-                for dim in (dims or []):
-                    try:
-                        full = str(get_com_member(dim, "FullName"))
-                    except Exception:
-                        full = ""
-                    try:
-                        val_mm = float(get_com_member(dim, "SystemValue")) * 1000.0
-                    except Exception:
-                        val_mm = None
-                    entry["dimensions"].append({"name": full, "value_mm": val_mm})
             except Exception:
-                pass
+                dims = None
+            for dim in (dims or []):
+                try:
+                    full = str(get_com_member(dim, "FullName"))
+                except Exception:
+                    full = ""
+                try:
+                    system_value = float(get_com_member(dim, "SystemValue"))
+                except Exception:
+                    system_value = None
+                entry["dimensions"].append(
+                    {
+                        "name": full,
+                        "value_mm": None if system_value is None else system_value * 1000.0,
+                        "system_value": system_value,
+                    }
+                )
+            # SW2024 类型库无 IFeature.GetDimensions; 退回 model.Parameter 探测。
+            if not entry["dimensions"] and entry["name"]:
+                for number in range(1, 9):
+                    full = f"D{number}@{entry['name']}"
+                    try:
+                        dim = get_com_member(model, "Parameter", full)
+                        system_value = float(get_com_member(dim, "SystemValue"))
+                    except Exception:
+                        continue
+                    entry["dimensions"].append(
+                        {
+                            "name": full,
+                            "value_mm": system_value * 1000.0,
+                            "system_value": system_value,
+                        }
+                    )
             result["features"].append(entry)
             idx += 1
             try:

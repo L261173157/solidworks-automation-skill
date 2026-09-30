@@ -450,6 +450,45 @@ def sketch_line(model, x1, y1, x2, y2):
     return model.SketchManager.CreateLine(x1, y1, 0, x2, y2, 0)
 
 
+def sketch_centerline(model, x1, y1, x2, y2):
+    """画构造中心线（单位: 米）。构造几何不参与轮廓, 可作旋转轴/阵列方向实体。"""
+    return model.SketchManager.CreateCenterLine(x1, y1, 0, x2, y2, 0)
+
+
+def find_centerline_segment(model, sketch_ref):
+    """在 (已消费) 草图中定位唯一构造中心线段。
+
+    供旋转轴 / 线性阵列方向实体解析使用。优先用 ``end_sketch`` 返回的
+    SketchSelectionRef.sketch 对象引用 (晚绑定下 Feature.GetSpecificFeature2
+    可能 Member not found); 数量不为 1 时抛 ValueError, 不猜测。
+
+    真机实测 (SW2024 SP5): 草图段 GetType 晚绑定下恒返回 0 不可依赖,
+    ConstructionGeometry 属性可靠; GetEntityName 对草图段返回空串,
+    对象级选择即可, 无需实体名。
+    """
+    sketch = getattr(sketch_ref, "sketch", None)
+    if sketch is None:
+        name = str(getattr(sketch_ref, "name", sketch_ref) or sketch_ref)
+        feature = None
+        for candidate in _get_sketch_name_candidates(name):
+            feature = _safe_com_member(model, "FeatureByName", candidate)
+            if feature:
+                break
+        for member in ("GetSpecificFeature2", "GetSpecificFeature"):
+            if feature is None:
+                break
+            sketch = _safe_com_member(feature, member)
+            if sketch is not None:
+                break
+    if sketch is None:
+        raise ValueError(f"无法获取草图对象以定位中心线: {sketch_ref}")
+    segments = _as_tuple(get_com_member(sketch, "GetSketchSegments"))
+    lines = [seg for seg in segments if bool(get_com_member(seg, "ConstructionGeometry"))]
+    if len(lines) != 1:
+        raise ValueError(f"构造中心线段数量必须为 1, 实际 {len(lines)}")
+    return lines[0]
+
+
 def sketch_rectangle(model, cx, cy, w, h):
     """以中心点画矩形（单位: 米）"""
     return model.SketchManager.CreateCenterRectangle(
@@ -729,14 +768,13 @@ def extrude_midplane(model, sketch_name, total_depth):
     )
 
 
-def revolve_boss(model, sketch_name, angle_rad, axis_sketch_name=None):
+def revolve_boss(model, sketch_name, angle_rad):
     """
-    旋转凸台
+    旋转凸台 (旋转轴 = 同一草图中唯一构造中心线, 见 sketch_centerline)
 
     参数:
-        sketch_name: 轮廓草图名称
+        sketch_name: 轮廓草图名称 (草图需含构造中心线)
         angle_rad: 旋转角度（弧度），2*pi 表示 360 度
-        axis_sketch_name: 旋转轴草图名称（None 则需预先选择轴线）
     """
     _ensure_sketch_selected(model, sketch_name)
     return model.FeatureManager.FeatureRevolve2(
@@ -750,14 +788,13 @@ def revolve_boss(model, sketch_name, angle_rad, axis_sketch_name=None):
     )
 
 
-def fillet(model, radius, edges=None):
+def fillet(model, radius):
     """
-    倒圆角
+    倒圆角 (目标边需预先选中, 真机实测 mark 1 可靠)
 
     参数:
         model: IModelDoc2
         radius: 圆角半径（米）
-        edges: 预先选择的边线列表，None 则使用当前选择
     """
     return model.FeatureManager.FeatureFillet(
         195, radius, 0, 0, None, None, None
@@ -766,7 +803,7 @@ def fillet(model, radius, edges=None):
 
 def chamfer(model, distance, angle_deg=45):
     """
-    倒角
+    倒角 (目标边需预先选中, 真机实测 mark 1 可靠)
 
     参数:
         distance: 倒角距离（米）
@@ -779,24 +816,33 @@ def chamfer(model, distance, angle_deg=45):
     )
 
 
-def linear_pattern(model, feature_name, d1_x, d1_y, d1_z, d1_spacing, d1_count,
-                    d2_x=0, d2_y=0, d2_z=0, d2_spacing=0, d2_count=1):
+def linear_pattern(model, feature_name, direction_segment, spacing, count, flip=False):
     """
-    线性阵列
+    特征级线性阵列 (真机查证 2026-09-30, SW2024 SP5)。
+
+    FeatureLinearPattern3 实为 10 参 (Num1, Spacing1, Num2, Spacing2,
+    FlipDir1, FlipDir2, DName1, DName2, GeometryPattern, VaryInstance);
+    DName1/DName2 传字面量 "NULL", 方向信息全部来自预选:
+    种子特征 mark 4 + 方向实体 mark 1。
 
     参数:
-        feature_name: 要阵列的特征名称
-        d1_*: 方向1 的方向向量、间距（米）和数量
-        d2_*: 方向2（可选）
+        feature_name: 被阵列特征名 (BODYFEATURE, mark 4)
+        direction_segment: 方向实体对象 (草图构造中心线段/边线, mark 1)
+        spacing: 间距（米）
+        count: 实例数 (含原始, >=2)
+        flip: 反转方向 1
     """
-    _select_by_id(model.Extension, feature_name, "BODYFEATURE", mark=4)
+    model.ClearSelection2(True)
+    if not _select_by_id(model.Extension, feature_name, "BODYFEATURE", mark=4):
+        raise ValueError(f"阵列种子特征选择失败: {feature_name}")
+    if not _select_com_object(direction_segment, append=True, mark=1):
+        raise ValueError("线性阵列方向实体选择失败")
     return model.FeatureManager.FeatureLinearPattern3(
-        d1_spacing, d2_spacing,
-        d1_count, d2_count,
+        int(count), float(spacing),
+        1, 0.01,
+        bool(flip), False,
+        "NULL", "NULL",
         False, False,
-        str(d1_x), str(d1_y), str(d1_z),
-        str(d2_x), str(d2_y), str(d2_z),
-        False, False
     )
 
 

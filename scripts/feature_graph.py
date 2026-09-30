@@ -1,18 +1,26 @@
-"""Feature Graph IR (v0.1): AI 意图与 COM 调用之间的确定性中间层。
+"""Feature Graph IR (v0.2): AI 意图与 COM 调用之间的确定性中间层。
 
 借鉴 SolidPilot 的 Feature Graph IR 思想 (全部全新实现, 未复制其代码):
 - AI 只产出符合 ``feature_graph.schema.json`` 的 IR (毫米单位, 特征以 id 引用);
 - ``validate_ir`` 做结构校验, ``lower_to_calls`` 做确定性降级 (无 LLM 参与),
   ``build_from_ir`` 按计划执行并追踪特征名;
 - 草图锚点复用 P2 声明式选择引擎 (基准面名或 face_anchor SelectionSpec);
-- 圆周阵列在草图层确定性展开 (circle_array), 特征级线性阵列走
-  ``sw_part.linear_pattern``。
+- 圆周阵列在草图层确定性展开 (circle_array); 特征级线性阵列的方向实体是
+  被引用草图中的唯一构造中心线 (centerline), 对象级预选 (mark 1) 后传给
+  FeatureLinearPattern3 (DName 传字面量 "NULL", 真机查证 2026-09-30);
+- revolve 的旋转轴 = 同一草图中唯一 centerline。
 
-v0.1 已知限制 (记录于 capabilities.yaml, 与 SolidPilot v0 相同):
-- 词表仅 extrude_boss / extrude_cut / linear_pattern;
-  revolve/fillet/chamfer 在 v0.2 路线;
-- 引用锚点不保证上游编辑后存活;
-- collect_ir 反向门是尽力而为的骨架, 不承诺往返等价。
+v0.2 词表 (经真机验证, SW2024 SP5): extrude_boss (含 flip/midplane) /
+extrude_cut (through_all) / revolve_boss / fillet / chamfer / 特征级
+linear_pattern (方向 = {sketch: <先前特征id>}); 草图 shape: rectangle /
+circle / circle_array / centerline。
+
+v0.2 已知限制 (记录于 capabilities.yaml):
+- 引用锚点 (face_anchor / fillet-chamfer 边) 不保证上游编辑后存活,
+  重建语义而非编辑语义;
+- fillet/chamfer 的边引用是拓扑实体, 歧义或未命中即停, 绝不猜测;
+- collect_ir 反向门对回读字段 (深度/半径/距离/角度/间距/数量) 承诺往返
+  等价, 草图轮廓与特征引用关系不回读, 仍需人工判读。
 """
 from __future__ import annotations
 
@@ -24,12 +32,17 @@ from typing import Any
 try:
     from .sw_connect import get_com_member, new_document, save_document
     from .sw_part import (
+        chamfer,
         current_sketch_name,
         end_sketch,
         extrude_boss,
         extrude_cut,
         extrude_midplane,
+        fillet,
+        find_centerline_segment,
         linear_pattern,
+        revolve_boss,
+        sketch_centerline,
         sketch_circle,
         sketch_corner_rectangle,
         start_sketch,
@@ -38,22 +51,28 @@ try:
 except ImportError:  # 直接以 scripts/ 为工作目录导入
     from sw_connect import get_com_member, new_document, save_document
     from sw_part import (
+        chamfer,
         current_sketch_name,
         end_sketch,
         extrude_boss,
         extrude_cut,
         extrude_midplane,
+        fillet,
+        find_centerline_segment,
         linear_pattern,
+        revolve_boss,
+        sketch_centerline,
         sketch_circle,
         sketch_corner_rectangle,
         start_sketch,
     )
     from sw_selection import resolve_selection
 
-FEATURE_GRAPH_SCHEMA_VERSION = "1.0"
-KNOWN_OPS = {"extrude_boss", "extrude_cut", "linear_pattern"}
-SHAPE_TYPES = {"rectangle", "circle", "circle_array"}
-SPEC_KINDS = {"coordinate", "plane", "face", "named"}
+FEATURE_GRAPH_SCHEMA_VERSION = "1.1"
+KNOWN_OPS = {"extrude_boss", "extrude_cut", "revolve_boss", "fillet", "chamfer", "linear_pattern"}
+SKETCH_OPS = {"extrude_boss", "extrude_cut", "revolve_boss"}  # 自带草图的特征 op
+SHAPE_TYPES = {"rectangle", "circle", "circle_array", "centerline"}
+SPEC_KINDS = {"coordinate", "plane", "face", "named", "edge"}
 
 SCHEMA_PATH = (
     Path(__file__).resolve().parents[1]
@@ -67,10 +86,10 @@ def _err(errors: list[str], message: str) -> None:
 
 def _validate_spec(spec: Any, where: str, errors: list[str]) -> None:
     if not isinstance(spec, dict):
-        _err(errors, f"{where}: face_anchor 必须是对象")
+        _err(errors, f"{where}: 必须是对象")
         return
     if spec.get("kind") not in SPEC_KINDS:
-        _err(errors, f"{where}: face_anchor.kind 非法: {spec.get('kind')!r}")
+        _err(errors, f"{where}: kind 非法: {spec.get('kind')!r} (允许: {sorted(SPEC_KINDS)})")
     if spec.get("kind") == "coordinate":
         point = spec.get("point_mm")
         if not (isinstance(point, list) and len(point) == 3):
@@ -86,6 +105,13 @@ def _validate_shape(shape: Any, where: str, errors: list[str]) -> None:
         for key in ("x1", "y1", "x2", "y2"):
             if not isinstance(shape.get(key), (int, float)):
                 _err(errors, f"{where}: rectangle 缺少数值字段 {key}")
+    elif kind == "centerline":
+        for key in ("x1", "y1", "x2", "y2"):
+            if not isinstance(shape.get(key), (int, float)):
+                _err(errors, f"{where}: centerline 缺少数值字段 {key}")
+                return
+        if (shape["x1"], shape["y1"]) == (shape["x2"], shape["y2"]):
+            _err(errors, f"{where}: centerline 长度为零")
     elif kind == "circle":
         for key in ("cx", "cy", "r"):
             if not isinstance(shape.get(key), (int, float)):
@@ -108,13 +134,25 @@ def _validate_sketch(sketch: Any, where: str, errors: list[str]) -> None:
     if has_plane == has_anchor:
         _err(errors, f"{where}: sketch 必须且只能提供 plane 或 face_anchor 之一")
     if has_anchor:
-        _validate_spec(sketch["face_anchor"], where, errors)
+        _validate_spec(sketch["face_anchor"], f"{where}.face_anchor", errors)
     shapes = sketch.get("shapes")
     if not isinstance(shapes, list) or not shapes:
         _err(errors, f"{where}: sketch.shapes 必须是非空数组")
         return
     for index, shape in enumerate(shapes):
         _validate_shape(shape, f"{where}.shapes[{index}]", errors)
+
+
+def _count_centerlines(shapes: list[Any]) -> int:
+    return sum(1 for shape in shapes if isinstance(shape, dict) and shape.get("type") == "centerline")
+
+
+def _validate_edges(edges: Any, where: str, errors: list[str]) -> None:
+    if not isinstance(edges, list) or not edges:
+        _err(errors, f"{where}: edges 必须是非空数组 (edge SelectionSpec)")
+        return
+    for index, spec in enumerate(edges):
+        _validate_spec(spec, f"{where}[{index}]", errors)
 
 
 def validate_ir(ir: Any) -> list[str]:
@@ -132,6 +170,7 @@ def validate_ir(ir: Any) -> list[str]:
         return errors
 
     seen_ids: set[str] = set()
+    centerline_counts: dict[str, int] = {}  # feature id -> 草图 centerline 数
     for index, feature in enumerate(features):
         where = f"features[{index}]"
         if not isinstance(feature, dict):
@@ -159,15 +198,45 @@ def validate_ir(ir: Any) -> list[str]:
                 depth = feature.get("depth_mm")
                 if not through_all and not (isinstance(depth, (int, float)) and depth > 0):
                     _err(errors, f"{where}: extrude_cut 需要 depth_mm>0 或 through_all=true")
+            shapes = (feature.get("sketch") or {}).get("shapes")
+            if isinstance(shapes, list):
+                centerline_counts[fid] = _count_centerlines(shapes)
+        elif op == "revolve_boss":
+            _validate_sketch(feature.get("sketch"), f"{where}.sketch", errors)
+            shapes = (feature.get("sketch") or {}).get("shapes")
+            count = _count_centerlines(shapes) if isinstance(shapes, list) else 0
+            if count != 1:
+                _err(errors, f"{where}: revolve_boss 草图必须恰含 1 条 centerline (实际 {count})")
+            centerline_counts[fid] = count
+            angle = feature.get("angle_deg", 360.0)
+            if not isinstance(angle, (int, float)) or not (0 < angle <= 360):
+                _err(errors, f"{where}: revolve_boss.angle_deg 必须是 (0,360] 内的数")
+        elif op == "fillet":
+            radius = feature.get("radius_mm")
+            if not isinstance(radius, (int, float)) or radius <= 0:
+                _err(errors, f"{where}: fillet.radius_mm 必须为正数")
+            _validate_edges(feature.get("edges"), f"{where}.edges", errors)
+        elif op == "chamfer":
+            distance = feature.get("distance_mm")
+            if not isinstance(distance, (int, float)) or distance <= 0:
+                _err(errors, f"{where}: chamfer.distance_mm 必须为正数")
+            angle = feature.get("angle_deg", 45.0)
+            if not isinstance(angle, (int, float)) or not (0 < angle < 90):
+                _err(errors, f"{where}: chamfer.angle_deg 必须是 (0,90) 内的数")
+            _validate_edges(feature.get("edges"), f"{where}.edges", errors)
         else:  # linear_pattern
             target = feature.get("target")
             if target not in seen_ids:
                 _err(errors, f"{where}: linear_pattern.target 必须引用先前的特征 id: {target!r}")
             direction = feature.get("direction")
-            if not (isinstance(direction, list) and len(direction) == 3):
-                _err(errors, f"{where}: direction 必须是 [x,y,z] 三元组")
-            elif all(not component for component in direction):
-                _err(errors, f"{where}: direction 不能是零向量")
+            if not (isinstance(direction, dict) and isinstance(direction.get("sketch"), str)):
+                _err(errors, f"{where}: direction 必须是 {{sketch: <先前特征id>}}")
+            else:
+                ref = direction.get("sketch")
+                if ref not in centerline_counts:
+                    _err(errors, f"{where}: direction.sketch 必须引用先前带草图特征的 id: {ref!r}")
+                elif centerline_counts[ref] != 1:
+                    _err(errors, f"{where}: direction.sketch 引用的草图必须恰含 1 条 centerline (实际 {centerline_counts[ref]})")
             spacing = feature.get("spacing_mm")
             if not isinstance(spacing, (int, float)) or spacing <= 0:
                 _err(errors, f"{where}: spacing_mm 必须为正数")
@@ -186,6 +255,13 @@ def _expand_shapes(shapes: list[dict[str, Any]]) -> list[dict[str, Any]]:
             expanded.append(
                 {
                     "type": "rectangle",
+                    "args": [shape["x1"] / 1000.0, shape["y1"] / 1000.0, shape["x2"] / 1000.0, shape["y2"] / 1000.0],
+                }
+            )
+        elif kind == "centerline":
+            expanded.append(
+                {
+                    "type": "centerline",
                     "args": [shape["x1"] / 1000.0, shape["y1"] / 1000.0, shape["x2"] / 1000.0, shape["y2"] / 1000.0],
                 }
             )
@@ -220,7 +296,7 @@ def lower_to_calls(ir: dict[str, Any]) -> list[dict[str, Any]]:
     plan: list[dict[str, Any]] = []
     for feature in ir["features"]:
         op = feature["op"]
-        if op in ("extrude_boss", "extrude_cut"):
+        if op in SKETCH_OPS:
             sketch = feature["sketch"]
             if sketch.get("plane"):
                 plan.append({"op": "sketch_start", "plane": sketch["plane"]})
@@ -229,25 +305,61 @@ def lower_to_calls(ir: dict[str, Any]) -> list[dict[str, Any]]:
             for expanded in _expand_shapes(sketch["shapes"]):
                 plan.append({"op": f"draw_{expanded['type']}", "args": expanded["args"]})
             plan.append({"op": "sketch_end"})
-            entry: dict[str, Any] = {"op": op, "id": feature["id"]}
             if op == "extrude_boss":
-                entry["depth_mm"] = feature["depth_mm"]
-                entry["midplane"] = bool(feature.get("midplane", False))
-                # 真机实测: 面上草图默认拉伸方向可能与基准面草图相反, flip 显式控制。
-                entry["flip"] = bool(feature.get("flip", False))
-            else:
-                entry["depth_mm"] = feature.get("depth_mm")
-                entry["through_all"] = bool(feature.get("through_all", False))
-                entry["flip"] = bool(feature.get("flip", False))
-            plan.append(entry)
+                plan.append(
+                    {
+                        "op": op,
+                        "id": feature["id"],
+                        "depth_mm": feature["depth_mm"],
+                        "midplane": bool(feature.get("midplane", False)),
+                        # 真机实测: 面上草图默认拉伸方向可能与基准面草图相反, flip 显式控制。
+                        "flip": bool(feature.get("flip", False)),
+                    }
+                )
+            elif op == "extrude_cut":
+                plan.append(
+                    {
+                        "op": op,
+                        "id": feature["id"],
+                        "depth_mm": feature.get("depth_mm"),
+                        "through_all": bool(feature.get("through_all", False)),
+                        "flip": bool(feature.get("flip", False)),
+                    }
+                )
+            else:  # revolve_boss
+                plan.append(
+                    {
+                        "op": op,
+                        "id": feature["id"],
+                        "angle_deg": float(feature.get("angle_deg", 360.0)),
+                    }
+                )
+        elif op == "fillet":
+            plan.append(
+                {
+                    "op": op,
+                    "id": feature["id"],
+                    "radius_mm": float(feature["radius_mm"]),
+                    "edges": list(feature["edges"]),
+                }
+            )
+        elif op == "chamfer":
+            plan.append(
+                {
+                    "op": op,
+                    "id": feature["id"],
+                    "distance_mm": float(feature["distance_mm"]),
+                    "angle_deg": float(feature.get("angle_deg", 45.0)),
+                    "edges": list(feature["edges"]),
+                }
+            )
         else:  # linear_pattern
-            direction = feature["direction"]
             plan.append(
                 {
                     "op": "linear_pattern",
                     "id": feature["id"],
                     "target": feature["target"],
-                    "direction": [float(direction[0]), float(direction[1]), float(direction[2])],
+                    "direction": {"sketch": feature["direction"]["sketch"]},
                     "spacing_mm": float(feature["spacing_mm"]),
                     "count": int(feature["count"]),
                 }
@@ -265,6 +377,18 @@ def start_sketch_on_anchor(model, spec: dict[str, Any]) -> dict[str, Any]:
     return evidence
 
 
+def _select_edges(model, edges: list[dict[str, Any]], label: str) -> list[dict[str, Any]]:
+    """按 edge SelectionSpec 逐条选边 (mark 1)。歧义/未命中即抛, 绝不猜测。"""
+    model.ClearSelection2(True)
+    evidences = []
+    for index, spec in enumerate(edges):
+        _handle, evidence = resolve_selection(model, spec, append=index > 0, mark=1)
+        if evidence.get("status") not in ("resolved", "resolved_object_only"):
+            raise RuntimeError(f"{label} 第 {index} 条边选择失败: {evidence}")
+        evidences.append(evidence)
+    return evidences
+
+
 def build_from_ir(
     sw,
     ir: dict[str, Any],
@@ -280,8 +404,10 @@ def build_from_ir(
     plan = lower_to_calls(ir)
     model = new_document(sw, "part")
     feature_names: dict[str, str] = {}
+    sketch_refs: dict[str, Any] = {}  # feature id -> SketchSelectionRef (centerline 解析用)
     executed: list[dict[str, Any]] = []
     active_sketch: str | None = None
+    last_sketch_ref = None
     try:
         for step in plan:
             op = step["op"]
@@ -294,9 +420,12 @@ def build_from_ir(
                 sketch_corner_rectangle(model, *step["args"])
             elif op == "draw_circle":
                 sketch_circle(model, *step["args"])
+            elif op == "draw_centerline":
+                sketch_centerline(model, *step["args"])
             elif op == "sketch_end":
                 sketch_ref = end_sketch(model)
                 active_sketch = getattr(sketch_ref, "name", None) or current_sketch_name(model)
+                last_sketch_ref = sketch_ref
                 executed.append({"op": op, "sketch": active_sketch})
                 continue
             elif op == "extrude_boss":
@@ -309,25 +438,50 @@ def build_from_ir(
                 if feature is None:
                     raise RuntimeError(f"拉伸特征创建失败: {step['id']}")
                 feature_names[step["id"]] = str(get_com_member(feature, "Name"))
+                sketch_refs[step["id"]] = last_sketch_ref
             elif op == "extrude_cut":
                 depth = 0.0 if step.get("through_all") else step["depth_mm"] / 1000.0
                 feature = extrude_cut(model, active_sketch, depth, flip=step.get("flip", False))
                 if feature is None:
                     raise RuntimeError(f"切除特征创建失败: {step['id']}")
                 feature_names[step["id"]] = str(get_com_member(feature, "Name"))
+                sketch_refs[step["id"]] = last_sketch_ref
+            elif op == "revolve_boss":
+                feature = revolve_boss(model, active_sketch, math.radians(step["angle_deg"]))
+                if feature is None:
+                    raise RuntimeError(f"旋转特征创建失败: {step['id']}")
+                feature_names[step["id"]] = str(get_com_member(feature, "Name"))
+                sketch_refs[step["id"]] = last_sketch_ref
+            elif op == "fillet":
+                _select_edges(model, step["edges"], "fillet")
+                feature = fillet(model, step["radius_mm"] / 1000.0)
+                if feature is None:
+                    raise RuntimeError(f"圆角特征创建失败: {step['id']}")
+                feature_names[step["id"]] = str(get_com_member(feature, "Name"))
+            elif op == "chamfer":
+                _select_edges(model, step["edges"], "chamfer")
+                feature = chamfer(model, step["distance_mm"] / 1000.0, step["angle_deg"])
+                if feature is None:
+                    raise RuntimeError(f"倒角特征创建失败: {step['id']}")
+                feature_names[step["id"]] = str(get_com_member(feature, "Name"))
             elif op == "linear_pattern":
                 target_name = feature_names.get(step["target"])
                 if not target_name:
                     raise RuntimeError(f"linear_pattern 目标特征未追踪到: {step['target']}")
-                dx, dy, dz = step["direction"]
+                direction_ref = sketch_refs.get(step["direction"]["sketch"])
+                if direction_ref is None:
+                    raise RuntimeError(f"linear_pattern 方向草图未追踪到: {step['direction']['sketch']}")
+                direction_segment = find_centerline_segment(model, direction_ref)
                 created = linear_pattern(
                     model,
                     target_name,
-                    dx, dy, dz,
+                    direction_segment,
                     step["spacing_mm"] / 1000.0,
                     step["count"],
                 )
-                feature_names[step["id"]] = str(get_com_member(created, "Name")) if created is not None else ""
+                if created is None:
+                    raise RuntimeError(f"特征级阵列创建失败: {step['id']}")
+                feature_names[step["id"]] = str(get_com_member(created, "Name"))
             else:  # pragma: no cover - lower_to_calls 只产出已知 op
                 raise RuntimeError(f"未知计划步骤: {op}")
             executed.append({"op": op, "ok": True})
@@ -354,26 +508,71 @@ def build_from_ir(
     return result
 
 
+# 反向门: GetTypeName2 特征类型名 -> op (真机实测 SW2024 SP5, 2026-09-30)
+_TYPE_NAME_TO_OP = {
+    "Extrusion": "extrude_boss",  # 基准面草图拉伸凸台
+    "ICE": "extrude_boss",        # 面上草图拉伸凸台
+    "Cut": "extrude_cut",
+    "Revolution": "revolve_boss",
+    "Fillet": "fillet",
+    "Chamfer": "chamfer",
+    "LPattern": "linear_pattern",
+}
+
+
 def collect_ir(model) -> dict[str, Any]:
-    """反向门 (尽力而为): 枚举特征生成 IR 骨架, 无法判定的 op 标记 unknown。"""
+    """反向门: 枚举特征生成 IR 骨架 + 可回读参数。
+
+    往返等价仅对回读字段承诺 (深度/半径/距离/角度/间距/数量, 单位已换算);
+    草图轮廓与特征引用关系不回读。尺寸回读经 model.Parameter("Dn@特征名")
+    (SW2024 类型库无 IFeature.GetDimensions, 见 sw_inspect.enumerate_features)。
+    """
     try:
         from .sw_inspect import enumerate_features
     except ImportError:
         from sw_inspect import enumerate_features
 
-    features = enumerate_features(model, max_features=200)
+    enumeration = enumerate_features(model, max_features=200)
     nodes = []
-    for feature in features:
-        type_name = str(feature.get("type_name") or "")
-        op = "extrude_boss" if "Extrusion" in type_name else "unknown"
-        nodes.append({"id": feature.get("name"), "op": op, "type_name": type_name})
+    for entry in enumeration.get("features", []):
+        name = str(entry.get("name") or "")
+        type_name = str(entry.get("type") or "")
+        dims: dict[str, float | None] = {}
+        for dim in entry.get("dimensions", []):
+            dims[str(dim.get("name"))] = dim.get("system_value")
+
+        def _dim(suffix: str) -> float | None:
+            return dims.get(f"{suffix}@{name}")
+
+        op = _TYPE_NAME_TO_OP.get(type_name, "unknown")
+        node: dict[str, Any] = {"id": name, "op": op, "type_name": type_name, "params": {}}
+        if op == "extrude_boss" or op == "extrude_cut":
+            value = _dim("D1")
+            node["params"]["depth_mm"] = None if value is None else value * 1000.0
+        elif op == "revolve_boss":
+            value = _dim("D1")
+            node["params"]["angle_deg"] = None if value is None else math.degrees(value)
+        elif op == "fillet":
+            value = _dim("D1")
+            node["params"]["radius_mm"] = None if value is None else value * 1000.0
+        elif op == "chamfer":
+            distance = _dim("D1")
+            angle = _dim("D2")
+            node["params"]["distance_mm"] = None if distance is None else distance * 1000.0
+            node["params"]["angle_deg"] = None if angle is None else math.degrees(angle)
+        elif op == "linear_pattern":
+            count = _dim("D1")
+            spacing = _dim("D3")
+            node["params"]["count"] = None if count is None else int(round(count))
+            node["params"]["spacing_mm"] = None if spacing is None else spacing * 1000.0
+        nodes.append(node)
     return {
         "schemaVersion": FEATURE_GRAPH_SCHEMA_VERSION,
         "name": "collected",
         "features": nodes,
         "limitations": [
-            "反向门是尽力而为的骨架, 不承诺往返等价",
-            "unknown 节点需要人工判读后手工改写为已知 op",
+            "往返等价仅对回读字段承诺 (深度/半径/距离/角度/间距/数量)",
+            "草图轮廓与特征引用关系不回读, unknown 节点需人工判读后手工改写",
         ],
     }
 

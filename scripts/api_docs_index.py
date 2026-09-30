@@ -90,6 +90,8 @@ CURATED_NOTES: dict[str, str] = {
     "IComponent2.SetTransformAndSolve2": "真机手记: 驱动组件位置并让装配求解器更新; 不稳定时优先复用组件现有 Transform2 改 ArrayData",
     "IModelDocExtension.GetMotionStudyManager": "真机手记: Motion Study 强类型接口在独立类型库 swmotionstudy.tlb",
     "ISldWorks.LoadFile4": "真机手记: 导入外来 CAD 文件用, 不支持 OpenDoc6 的 silent 选项; 需动态代理传递 by-ref VARIANT",
+    "IFeatureManager.FeatureLinearPattern3": "真机手记 (SW2024 SP5): 10 参 (Num1, Spacing1, Num2, Spacing2, FlipDir1, FlipDir2, DName1, DName2, GeometryPattern, VaryInstance); DName1/DName2 传字面量 \"NULL\", 方向实体走预选: 方向1=mark 1 / 方向2=mark 2, 种子特征=mark 4 (BODYFEATURE); 已消费草图中的构造中心线段 (对象级 Select2) 可作方向实体",
+    "IModelDoc2.FirstFeature": "真机手记 (SW2024 SP5): 特征枚举成员名是 FirstFeature (0 参), GetFirstFeature 不存在; 链式 GetNextFeature; 特征尺寸回读用 IModelDoc2.Parameter(\"Dn@特征名\").SystemValue (长度米/角度弧度), IFeature.GetDimensions 在 SW2024 类型库不存在",
 }
 
 INVOKE_KINDS = {1: "method", 2: "propget", 4: "propput", 8: "propputref"}
