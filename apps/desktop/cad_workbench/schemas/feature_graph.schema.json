@@ -1,12 +1,12 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "CAD Studio Feature Graph IR v0.2",
-  "description": "确定性特征图中间表示: 草图锚点(平面或 SelectionSpec) + 拉伸/切除/旋转/圆角/倒角/线性阵列; 长度单位一律毫米, 角度单位度。revolve 的轴与 linear_pattern 的方向实体是草图中的唯一构造中心线 (centerline)。引用锚点 (face_anchor/边线) 不保证上游编辑后存活 (重建语义)。",
+  "title": "CAD Studio Feature Graph IR v0.3",
+  "description": "确定性特征图中间表示: 草图锚点(平面或 SelectionSpec) + 拉伸/切除/旋转/圆角/倒角/线性阵列; 长度单位一律毫米, 角度单位度。revolve 的轴与 linear_pattern 的方向实体是草图中的唯一构造中心线 (centerline)。方向实体仅支持 {sketch: id} 形态: 基准轴/模型边线在 FeatureLinearPattern3 晚绑定路径被真机否定 (err=51 swSketchErrorExtRefFail)。引用锚点 (face_anchor/边线) 不保证上游编辑后存活 (重建语义)。",
   "type": "object",
   "required": ["schemaVersion", "name", "features"],
   "additionalProperties": false,
   "properties": {
-    "schemaVersion": {"const": "1.1"},
+    "schemaVersion": {"const": "1.2"},
     "name": {"type": "string", "minLength": 1},
     "features": {"type": "array", "minItems": 1, "items": {"$ref": "#/definitions/feature"}}
   },
@@ -168,11 +168,21 @@
           "required": ["sketch"],
           "additionalProperties": false,
           "properties": {
-            "sketch": {"type": "string", "description": "先前带草图特征的 id; 其草图恰含 1 条 centerline 作方向实体"}
+            "sketch": {"type": "string", "description": "先前带草图特征的 id; 其草图恰含 1 条 centerline 作方向 1 实体 (mark 1)"}
+          }
+        },
+        "direction2": {
+          "type": "object",
+          "required": ["sketch"],
+          "additionalProperties": false,
+          "properties": {
+            "sketch": {"type": "string", "description": "方向 2 草图特征 id; 必须不同于 direction.sketch, 各自恰含 1 条 centerline (mark 2)"}
           }
         },
         "spacing_mm": {"type": "number", "exclusiveMinimum": 0},
-        "count": {"type": "integer", "minimum": 2}
+        "count": {"type": "integer", "minimum": 2},
+        "spacing2_mm": {"type": "number", "exclusiveMinimum": 0, "description": "方向 2 间距; direction2 存在时必填"},
+        "count2": {"type": "integer", "minimum": 2, "description": "方向 2 实例数 (含原始); direction2 存在时必填"}
       }
     },
     "feature": {

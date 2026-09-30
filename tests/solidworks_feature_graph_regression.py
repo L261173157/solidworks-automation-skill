@@ -1,4 +1,4 @@
-"""真机回归: Feature Graph IR 试点 — 参数化件双路构建对比 (v0.2: 7 场景)。
+"""真机回归: Feature Graph IR — 参数化件双路构建对比 (v0.3: 8 场景)。
 
 需要 Windows + SolidWorks + pywin32; 不被 pytest 收集 (无 test_ 前缀)::
 
@@ -6,8 +6,10 @@
 
 每个部件: 直调库函数构建参照件 -> build_from_ir 构建试点件 ->
 compare_documents 必须 verified -> 闭式解体积独立校验 (防止双路同错)。
-v0.2 新增: revolve 阶梯轴 / fillet+chamfer 块 / 特征级 linear_pattern /
+v0.2: revolve 阶梯轴 / fillet+chamfer 块 / 特征级 linear_pattern /
 反向门 collect_ir 往返校验。
+v0.3: linear_pattern 方向 2 (mark 2) 双向网格 + D2/D4 往返校验
+(方向实体仅中心线段; 基准轴/边线真机否定见 tests/probe_dir2_axis.py)。
 """
 from __future__ import annotations
 
@@ -152,7 +154,7 @@ def _bracket_reference(sw, out_dir: Path) -> Path:
 
 
 IR_BOX_PATTERN = {
-    "schemaVersion": "1.1",
+    "schemaVersion": "1.2",
     "name": "ir_box_pattern",
     "features": [
         {
@@ -182,7 +184,7 @@ IR_BOX_PATTERN = {
 }
 
 IR_FLANGE = {
-    "schemaVersion": "1.1",
+    "schemaVersion": "1.2",
     "name": "ir_flange",
     "features": [
         {
@@ -215,7 +217,7 @@ IR_FLANGE = {
 }
 
 IR_BRACKET = {
-    "schemaVersion": "1.1",
+    "schemaVersion": "1.2",
     "name": "ir_bracket",
     "features": [
         {
@@ -293,7 +295,7 @@ def scenario_bracket(sw, out_dir: Path) -> dict:
 # ---------------------------------------------------------------------------
 
 IR_SHAFT = {
-    "schemaVersion": "1.1",
+    "schemaVersion": "1.2",
     "name": "ir_shaft",
     "features": [
         {
@@ -324,7 +326,7 @@ IR_SHAFT = {
 }
 
 IR_FILLET_CHAMFER = {
-    "schemaVersion": "1.1",
+    "schemaVersion": "1.2",
     "name": "ir_treated",
     "features": [
         {
@@ -359,7 +361,7 @@ IR_FILLET_CHAMFER = {
 }
 
 IR_PATTERN_PLATE = {
-    "schemaVersion": "1.1",
+    "schemaVersion": "1.2",
     "name": "ir_pattern_plate",
     "features": [
         {
@@ -396,7 +398,7 @@ IR_PATTERN_PLATE = {
 }
 
 IR_ROUNDTRIP = {
-    "schemaVersion": "1.1",
+    "schemaVersion": "1.2",
     "name": "ir_roundtrip",
     "features": IR_PATTERN_PLATE["features"]
     + [
@@ -411,6 +413,57 @@ IR_ROUNDTRIP = {
                 {"kind": "edge", "point_mm": [30, 20, -4]},
             ],
         }
+    ],
+}
+
+
+# ---------------------------------------------------------------------------
+# v0.3 场景: linear_pattern 方向 2 (mark 2) 双向网格 + D2/D4 往返校验
+# ---------------------------------------------------------------------------
+
+IR_PATTERN_GRID = {
+    "schemaVersion": "1.2",
+    "name": "ir_pattern_grid",
+    "features": [
+        {
+            # 底板草图: 矩形 + 水平 centerline (方向 1 实体)。
+            "id": "plate",
+            "op": "extrude_boss",
+            "sketch": {
+                "plane": "Front Plane",
+                "shapes": [
+                    {"type": "rectangle", "x1": -30, "y1": -20, "x2": 30, "y2": 20},
+                    {"type": "centerline", "x1": -40, "y1": 0, "x2": 40, "y2": 0},
+                ],
+            },
+            "depth_mm": 8,
+        },
+        {
+            # 凸台草图: 矩形 + 竖直 centerline (方向 2 实体; 必须引用另一个草图)。
+            "id": "boss",
+            "op": "extrude_boss",
+            "sketch": {
+                "face_anchor": {"kind": "coordinate", "point_mm": [0, 0, 8]},
+                "shapes": [
+                    {"type": "rectangle", "x1": -27.5, "y1": -20, "x2": -17.5, "y2": -10},
+                    {"type": "centerline", "x1": -22.5, "y1": -25, "x2": -22.5, "y2": 25},
+                ],
+            },
+            "depth_mm": 5,
+            "flip": True,
+        },
+        {
+            # 4x3 网格: 方向 1 沿板中心线 (X) 4 实例, 方向 2 沿凸台草图中心线 (Y) 3 实例。
+            "id": "grid",
+            "op": "linear_pattern",
+            "target": "boss",
+            "direction": {"sketch": "plate"},
+            "direction2": {"sketch": "boss"},
+            "spacing_mm": 15,
+            "count": 4,
+            "spacing2_mm": 15,
+            "count2": 3,
+        },
     ],
 }
 
@@ -524,6 +577,46 @@ def _pattern_reference(sw, out_dir: Path) -> Path:
     return path
 
 
+def _grid_reference(sw, out_dir: Path) -> Path:
+    """底板(水平中心线) + 凸台(竖直中心线) + 4x3 双向网格 (直调路径, mark 2)。"""
+    model = new_document(sw, "part")
+    start_sketch(model, "Front Plane")
+    model.SketchManager.CreateCenterLine(-0.04, 0, 0, 0.04, 0, 0)
+    sketch_corner_rectangle(model, -0.03, -0.02, 0.03, 0.02)
+    plate_ref = end_sketch(model)
+    if extrude_boss(model, plate_ref.name, 0.008) is None:
+        raise RuntimeError("参照件底板失败")
+    _sketch_on_face(model, [0, 0, 8])
+    model.SketchManager.CreateCenterLine(-0.0225, -0.025, 0, -0.0225, 0.025, 0)
+    sketch_corner_rectangle(model, -0.0275, -0.02, -0.0175, -0.01)
+    boss_ref = end_sketch(model)
+    # 真机实测: 面上草图默认拉伸方向朝材料内, 参照件同样翻转保持双路一致。
+    boss = extrude_boss(model, boss_ref.name, 0.005, direction=False)
+    if boss is None:
+        raise RuntimeError("参照件凸台失败")
+    boss_name = str(get_com_member(boss, "Name"))
+    dir1_segment = find_centerline_segment(model, plate_ref)
+    dir2_segment = find_centerline_segment(model, boss_ref)
+    if (
+        linear_pattern(
+            model,
+            boss_name,
+            dir1_segment,
+            0.015,
+            4,
+            direction2_segment=dir2_segment,
+            spacing2=0.015,
+            count2=3,
+        )
+        is None
+    ):
+        raise RuntimeError("参照件双向网格阵列失败")
+    path = out_dir / "ref_pattern_grid.SLDPRT"
+    if not save_document(model, str(path)):
+        raise RuntimeError("参照件保存失败")
+    return path
+
+
 def _roundtrip_reference(sw, out_dir: Path) -> Path:
     model = new_document(sw, "part")
     _plate_boss_pattern_core(model)
@@ -566,6 +659,26 @@ def scenario_linear_pattern(sw, out_dir: Path) -> dict:
     expected = 60 * 40 * 8 + 4 * 10 * 10 * 5
     detail = _ir_scenario(sw, out_dir, "linear_pattern", IR_PATTERN_PLATE, reference, expected)
     _assert_volume(sw, reference, expected, "linear_pattern 参照件")
+    return detail
+
+
+def scenario_linear_pattern_dir2(sw, out_dir: Path) -> dict:
+    reference = _grid_reference(sw, out_dir)
+    expected = 60 * 40 * 8 + 4 * 3 * 10 * 10 * 5
+    detail = _ir_scenario(sw, out_dir, "linear_pattern_dir2", IR_PATTERN_GRID, reference, expected)
+    _assert_volume(sw, reference, expected, "linear_pattern_dir2 参照件")
+    # 反向门: 方向 2 的数量/间距走 D2/D4 (真机实测后缀), 随主回归一起校验。
+    ops = _assert_roundtrip(
+        sw,
+        out_dir / f"{IR_PATTERN_GRID['name']}.SLDPRT",
+        ["extrude_boss", "extrude_boss", "linear_pattern"],
+        {
+            0: {"depth_mm": 8},
+            1: {"depth_mm": 5},
+            2: {"count": 4, "spacing_mm": 15, "count2": 3, "spacing2_mm": 15},
+        },
+    )
+    detail["collected_ops"] = ops
     return detail
 
 
@@ -612,6 +725,7 @@ SCENARIOS = (
     scenario_revolve_shaft,
     scenario_fillet_chamfer,
     scenario_linear_pattern,
+    scenario_linear_pattern_dir2,
     scenario_reverse_gate,
 )
 

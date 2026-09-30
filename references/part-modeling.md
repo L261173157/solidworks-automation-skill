@@ -269,16 +269,37 @@ feature = model.FeatureManager.FeatureLinearPattern3(
 ```python
 model.ClearSelection2(True)
 # 1) 种子特征: SelectByID2(name, "BODYFEATURE", 0,0,0, False, 4, callout, 0)  # mark 4
-# 2) 方向 1 实体: 对象级 Select2(append=True, mark=1)  # mark 1; 方向 2 用 mark 2
-#    方向实体可以是: 模型边线、基准轴、或**已消费草图中的构造中心线段**
+# 2) 方向 1 实体: 对象级 Select2(append=True, mark=1)  # mark 1
+# 3) 方向 2 实体: 对象级 Select2(append=True, mark=2)  # mark 2 (可选; Num2/Spacing2 同步传参)
+#    方向实体 = 已消费草图中的构造中心线段
 #    (晚绑定下用 SketchSelectionRef.sketch.GetSketchSegments 枚举,
 #     按 ConstructionGeometry == True 定位; GetType 可能恒返回 0 不可依赖,
 #     GetEntityName 对草图段返回空串, 对象级选择即可)
 ```
 
-真机验证: 底板草图 (矩形 + 构造中心线) 拉伸消费后, 中心线段作方向实体,
-`FeatureLinearPattern3(4, 0.015, 1, 0.01, False, False, "NULL", "NULL", False, False)`
-创建 4 实例阵列, 改名 + ForceRebuild3 + FeatureByName 回读持久化通过, 闭式解体积校验 0.000% 偏差。
+真机验证 (2026-09-30, SW2024 SP5):
+- 单方向: 底板草图 (矩形 + 构造中心线) 拉伸消费后, 中心线段作方向实体,
+  `FeatureLinearPattern3(4, 0.015, 1, 0.01, False, False, "NULL", "NULL", False, False)`
+  创建 4 实例阵列, 闭式解体积校验 0.000% 偏差。
+- **方向 2 (mark 2)**: 底板草图水平中心线 (方向 1) + 凸台草图竖直中心线 (方向 2),
+  `FeatureLinearPattern3(4, 0.015, 3, 0.015, False, False, "NULL", "NULL", False, False)`
+  创建 4x3 双向网格, 闭式解体积 25200 mm³ 校验 0.000% 偏差。
+- **尺寸后缀**: D1=数量1, D2=数量2, D3=间距1(米), D4=间距2(米); 单方向阵列无 D2/D4。
+
+**方向实体边界 (真机否定, 2026-09-30, tests/probe_dir2_axis.py)**:
+基准轴与模型边线虽见诸 API 文档口径, 但 `FeatureLinearPattern3` 晚绑定路径下
+均不可用作方向实体 —— 特征可创建但 `GetErrorCode()`=51 (swFeatureErrorExtRefFail),
+`GetDefinition().GetD1AxisType()` 中心线段=3 (唯一可用) / 边线=1 / 基准轴=0,
+实例坍缩为种子 (体积=板+1凸台)。已排除路线: SelectByID2 "AXIS"、对象级 Select2
+(axis 特征与 RefAxis 底层对象)、mark 128、DName 传轴名/空串、按坐标
+SelectByID2 "EDGE" (官方示例口径)、方向先选/种子后选的顺序调换。
+**结论: 方向实体只写已消费草图构造中心线段。**
+
+**创建基准轴 (InsertAxis, 真机配方)**: 预选两个基准面 (SelectByID2 "PLANE",
+如 Front+Right 交线 = Y 轴) 后读 `model.InsertAxis` —— 晚绑定 dynamic dispatch
+下表现为**属性**, 属性读取即触发插入并返回 bool (`get_com_member` 兼容两种形态);
+新特征名 Axis1, `GetTypeName2()`="RefAxis"。该轴可作
+`FeatureCircularPattern4` 的旋转轴 (mark 1), 但不可作线性阵列方向实体 (见上)。
 
 坑: 旧代码按 14 参、方向传 `str(dx)`/`str(dy)`/`str(dz)` 的写法是错的
 (实际是 `FeatureLinearPattern4` 的 20 参口径且 DName 是尺寸名而非向量), 会报

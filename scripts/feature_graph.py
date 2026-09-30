@@ -1,4 +1,4 @@
-"""Feature Graph IR (v0.2): AI 意图与 COM 调用之间的确定性中间层。
+"""Feature Graph IR (v0.3): AI 意图与 COM 调用之间的确定性中间层。
 
 借鉴 SolidPilot 的 Feature Graph IR 思想 (全部全新实现, 未复制其代码):
 - AI 只产出符合 ``feature_graph.schema.json`` 的 IR (毫米单位, 特征以 id 引用);
@@ -6,21 +6,30 @@
   ``build_from_ir`` 按计划执行并追踪特征名;
 - 草图锚点复用 P2 声明式选择引擎 (基准面名或 face_anchor SelectionSpec);
 - 圆周阵列在草图层确定性展开 (circle_array); 特征级线性阵列的方向实体是
-  被引用草图中的唯一构造中心线 (centerline), 对象级预选 (mark 1) 后传给
-  FeatureLinearPattern3 (DName 传字面量 "NULL", 真机查证 2026-09-30);
+  被引用草图中的唯一构造中心线 (centerline), 对象级预选 (方向 1 = mark 1,
+  方向 2 = mark 2) 后传给 FeatureLinearPattern3 (DName 传字面量 "NULL",
+  真机查证 2026-09-30);
 - revolve 的旋转轴 = 同一草图中唯一 centerline。
 
-v0.2 词表 (经真机验证, SW2024 SP5): extrude_boss (含 flip/midplane) /
+v0.3 词表 (经真机验证, SW2024 SP5): extrude_boss (含 flip/midplane) /
 extrude_cut (through_all) / revolve_boss / fillet / chamfer / 特征级
-linear_pattern (方向 = {sketch: <先前特征id>}); 草图 shape: rectangle /
-circle / circle_array / centerline。
+linear_pattern (方向 1 = {sketch: <先前特征id>}, 可选 direction2/count2/
+spacing2_mm 双向网格; 方向 2 草图必须不同于方向 1, 各自恰含 1 条 centerline);
+草图 shape: rectangle / circle / circle_array / centerline。
 
-v0.2 已知限制 (记录于 capabilities.yaml):
+方向实体边界 (真机 2026-09-30, tests/probe_dir2_axis.py): 基准轴/模型边线
+虽见诸 API 文档口径, 但 FeatureLinearPattern3 晚绑定路径下均被拒绝
+(GetErrorCode=51 swSketchErrorExtRefFail, 实例坍缩为种子); 唯一可用方向
+实体 = 已消费草图构造中心线段 (GetD1AxisType()=3)。IR 因此只接受
+{sketch: id} 形态, 不引入 axis/edge 方向。
+
+v0.3 已知限制 (记录于 capabilities.yaml):
 - 引用锚点 (face_anchor / fillet-chamfer 边) 不保证上游编辑后存活,
   重建语义而非编辑语义;
 - fillet/chamfer 的边引用是拓扑实体, 歧义或未命中即停, 绝不猜测;
-- collect_ir 反向门对回读字段 (深度/半径/距离/角度/间距/数量) 承诺往返
-  等价, 草图轮廓与特征引用关系不回读, 仍需人工判读。
+- collect_ir 反向门对回读字段 (深度/半径/距离/角度/间距/数量, 含方向 2
+  的数量/间距 D2/D4) 承诺往返等价, 草图轮廓与特征引用关系不回读,
+  仍需人工判读。
 """
 from __future__ import annotations
 
@@ -68,7 +77,7 @@ except ImportError:  # 直接以 scripts/ 为工作目录导入
     )
     from sw_selection import resolve_selection
 
-FEATURE_GRAPH_SCHEMA_VERSION = "1.1"
+FEATURE_GRAPH_SCHEMA_VERSION = "1.2"
 KNOWN_OPS = {"extrude_boss", "extrude_cut", "revolve_boss", "fillet", "chamfer", "linear_pattern"}
 SKETCH_OPS = {"extrude_boss", "extrude_cut", "revolve_boss"}  # 自带草图的特征 op
 SHAPE_TYPES = {"rectangle", "circle", "circle_array", "centerline"}
@@ -155,6 +164,23 @@ def _validate_edges(edges: Any, where: str, errors: list[str]) -> None:
         _validate_spec(spec, f"{where}[{index}]", errors)
 
 
+def _validate_direction_sketch(
+    direction: Any, where: str, errors: list[str], centerline_counts: dict[str, int]
+) -> None:
+    """direction / direction2 共用: {sketch: <先前特征id>} 且该草图恰含 1 条 centerline。
+
+    axis / 模型边线形态被真机否定 (FeatureLinearPattern3 晚绑定拒绝, 见模块
+    docstring), 词表不接受。"""
+    if not (isinstance(direction, dict) and isinstance(direction.get("sketch"), str)):
+        _err(errors, f"{where}: 必须是 {{sketch: <先前特征id>}}")
+        return
+    ref = direction.get("sketch")
+    if ref not in centerline_counts:
+        _err(errors, f"{where}.sketch 必须引用先前带草图特征的 id: {ref!r}")
+    elif centerline_counts[ref] != 1:
+        _err(errors, f"{where}.sketch 引用的草图必须恰含 1 条 centerline (实际 {centerline_counts[ref]})")
+
+
 def validate_ir(ir: Any) -> list[str]:
     """结构校验, 返回错误列表 (空列表 = 通过)。不依赖 jsonschema 库。"""
     errors: list[str] = []
@@ -229,20 +255,34 @@ def validate_ir(ir: Any) -> list[str]:
             if target not in seen_ids:
                 _err(errors, f"{where}: linear_pattern.target 必须引用先前的特征 id: {target!r}")
             direction = feature.get("direction")
-            if not (isinstance(direction, dict) and isinstance(direction.get("sketch"), str)):
-                _err(errors, f"{where}: direction 必须是 {{sketch: <先前特征id>}}")
-            else:
-                ref = direction.get("sketch")
-                if ref not in centerline_counts:
-                    _err(errors, f"{where}: direction.sketch 必须引用先前带草图特征的 id: {ref!r}")
-                elif centerline_counts[ref] != 1:
-                    _err(errors, f"{where}: direction.sketch 引用的草图必须恰含 1 条 centerline (实际 {centerline_counts[ref]})")
+            _validate_direction_sketch(direction, f"{where}.direction", errors, centerline_counts)
             spacing = feature.get("spacing_mm")
             if not isinstance(spacing, (int, float)) or spacing <= 0:
                 _err(errors, f"{where}: spacing_mm 必须为正数")
             count = feature.get("count")
             if not isinstance(count, int) or count < 2:
                 _err(errors, f"{where}: count 必须是 >=2 的整数")
+            direction2 = feature.get("direction2")
+            if direction2 is not None:
+                _validate_direction_sketch(
+                    direction2, f"{where}.direction2", errors, centerline_counts
+                )
+                # 同一草图只有 1 条 centerline, 方向 2 必须引用另一个草图特征。
+                if (
+                    isinstance(direction2, dict)
+                    and isinstance(direction2.get("sketch"), str)
+                    and isinstance(direction, dict)
+                    and direction2.get("sketch") == direction.get("sketch")
+                ):
+                    _err(errors, f"{where}: direction2.sketch 必须引用与 direction 不同的草图特征")
+                spacing2 = feature.get("spacing2_mm")
+                if not isinstance(spacing2, (int, float)) or spacing2 <= 0:
+                    _err(errors, f"{where}: direction2 存在时 spacing2_mm 必须为正数")
+                count2 = feature.get("count2")
+                if not isinstance(count2, int) or count2 < 2:
+                    _err(errors, f"{where}: direction2 存在时 count2 必须是 >=2 的整数")
+            elif "count2" in feature or "spacing2_mm" in feature:
+                _err(errors, f"{where}: count2/spacing2_mm 依赖 direction2, 后者缺失")
     return errors
 
 
@@ -354,16 +394,19 @@ def lower_to_calls(ir: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
         else:  # linear_pattern
-            plan.append(
-                {
-                    "op": "linear_pattern",
-                    "id": feature["id"],
-                    "target": feature["target"],
-                    "direction": {"sketch": feature["direction"]["sketch"]},
-                    "spacing_mm": float(feature["spacing_mm"]),
-                    "count": int(feature["count"]),
-                }
-            )
+            plan_item = {
+                "op": "linear_pattern",
+                "id": feature["id"],
+                "target": feature["target"],
+                "direction": {"sketch": feature["direction"]["sketch"]},
+                "spacing_mm": float(feature["spacing_mm"]),
+                "count": int(feature["count"]),
+            }
+            if feature.get("direction2") is not None:
+                plan_item["direction2"] = {"sketch": feature["direction2"]["sketch"]}
+                plan_item["spacing2_mm"] = float(feature["spacing2_mm"])
+                plan_item["count2"] = int(feature["count2"])
+            plan.append(plan_item)
     return plan
 
 
@@ -472,12 +515,23 @@ def build_from_ir(
                 if direction_ref is None:
                     raise RuntimeError(f"linear_pattern 方向草图未追踪到: {step['direction']['sketch']}")
                 direction_segment = find_centerline_segment(model, direction_ref)
+                direction2_segment = None
+                if step.get("direction2") is not None:
+                    direction2_ref = sketch_refs.get(step["direction2"]["sketch"])
+                    if direction2_ref is None:
+                        raise RuntimeError(
+                            f"linear_pattern 方向 2 草图未追踪到: {step['direction2']['sketch']}"
+                        )
+                    direction2_segment = find_centerline_segment(model, direction2_ref)
                 created = linear_pattern(
                     model,
                     target_name,
                     direction_segment,
                     step["spacing_mm"] / 1000.0,
                     step["count"],
+                    direction2_segment=direction2_segment,
+                    spacing2=(step["spacing2_mm"] / 1000.0) if step.get("direction2") else 0.01,
+                    count2=step.get("count2", 1),
                 )
                 if created is None:
                     raise RuntimeError(f"特征级阵列创建失败: {step['id']}")
@@ -561,17 +615,23 @@ def collect_ir(model) -> dict[str, Any]:
             node["params"]["distance_mm"] = None if distance is None else distance * 1000.0
             node["params"]["angle_deg"] = None if angle is None else math.degrees(angle)
         elif op == "linear_pattern":
+            # 真机实测 (2026-09-30): D1=数量1, D2=数量2, D3=间距1(米), D4=间距2(米);
+            # 单方向阵列无 D2/D4, 回读为 None。
             count = _dim("D1")
             spacing = _dim("D3")
+            count2 = _dim("D2")
+            spacing2 = _dim("D4")
             node["params"]["count"] = None if count is None else int(round(count))
             node["params"]["spacing_mm"] = None if spacing is None else spacing * 1000.0
+            node["params"]["count2"] = None if count2 is None else int(round(count2))
+            node["params"]["spacing2_mm"] = None if spacing2 is None else spacing2 * 1000.0
         nodes.append(node)
     return {
         "schemaVersion": FEATURE_GRAPH_SCHEMA_VERSION,
         "name": "collected",
         "features": nodes,
         "limitations": [
-            "往返等价仅对回读字段承诺 (深度/半径/距离/角度/间距/数量)",
+            "往返等价仅对回读字段承诺 (深度/半径/距离/角度/间距/数量, 含方向 2 的 D2/D4)",
             "草图轮廓与特征引用关系不回读, unknown 节点需人工判读后手工改写",
         ],
     }

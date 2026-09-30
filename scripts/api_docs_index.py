@@ -90,7 +90,8 @@ CURATED_NOTES: dict[str, str] = {
     "IComponent2.SetTransformAndSolve2": "真机手记: 驱动组件位置并让装配求解器更新; 不稳定时优先复用组件现有 Transform2 改 ArrayData",
     "IModelDocExtension.GetMotionStudyManager": "真机手记: Motion Study 强类型接口在独立类型库 swmotionstudy.tlb",
     "ISldWorks.LoadFile4": "真机手记: 导入外来 CAD 文件用, 不支持 OpenDoc6 的 silent 选项; 需动态代理传递 by-ref VARIANT",
-    "IFeatureManager.FeatureLinearPattern3": "真机手记 (SW2024 SP5): 10 参 (Num1, Spacing1, Num2, Spacing2, FlipDir1, FlipDir2, DName1, DName2, GeometryPattern, VaryInstance); DName1/DName2 传字面量 \"NULL\", 方向实体走预选: 方向1=mark 1 / 方向2=mark 2, 种子特征=mark 4 (BODYFEATURE); 已消费草图中的构造中心线段 (对象级 Select2) 可作方向实体",
+    "IFeatureManager.FeatureLinearPattern3": "真机手记 (SW2024 SP5): 10 参 (Num1, Spacing1, Num2, Spacing2, FlipDir1, FlipDir2, DName1, DName2, GeometryPattern, VaryInstance); DName1/DName2 传字面量 \"NULL\", 方向实体走预选: 方向1=mark 1 / 方向2=mark 2, 种子特征=mark 4 (BODYFEATURE); 已消费草图中的构造中心线段 (对象级 Select2) 可作方向实体。2026-09-30 补充: 方向 2 (mark 2) 双向网格真机验证成立 (4x3 闭式解 0.000%); 尺寸后缀 D1=数量1, D2=数量2, D3=间距1(米), D4=间距2(米)。方向实体仅中心线段可用: 基准轴 (SelectByID2 \"AXIS\"/对象级/mark 128/RefAxis 底层对象/DName 传轴名) 与模型边线 (对象级/按坐标 SelectByID2 \"EDGE\", 含官方示例口径) 均被拒绝 — 特征可建但 GetErrorCode()=51 (swFeatureErrorExtRefFail), GetDefinition().GetD1AxisType() 轴=0/边线=1/中心线段=3, 实例坍缩为种子",
+    "IModelDoc2.InsertAxis": "真机手记 (SW2024 SP5): 预选两个基准面 (SelectByID2 PLANE) 后, 交线处创建基准轴特征 (名字 Axis1, GetTypeName2=\"RefAxis\"); 晚绑定 dynamic dispatch 下 InsertAxis 表现为属性 — 属性读取即触发插入并返回 bool, get_com_member 兼容属性/方法两种形态; 该轴可被 FeatureCircularPattern4 消费 (mark 1), 但 FeatureLinearPattern3 拒绝其作方向实体 (见上条)",
     "IModelDoc2.FirstFeature": "真机手记 (SW2024 SP5): 特征枚举成员名是 FirstFeature (0 参), GetFirstFeature 不存在; 链式 GetNextFeature; 特征尺寸回读用 IModelDoc2.Parameter(\"Dn@特征名\").SystemValue (长度米/角度弧度), IFeature.GetDimensions 在 SW2024 类型库不存在",
 }
 

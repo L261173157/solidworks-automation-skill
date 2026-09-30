@@ -816,31 +816,56 @@ def chamfer(model, distance, angle_deg=45):
     )
 
 
-def linear_pattern(model, feature_name, direction_segment, spacing, count, flip=False):
+def linear_pattern(
+    model,
+    feature_name,
+    direction_segment,
+    spacing,
+    count,
+    flip=False,
+    direction2_segment=None,
+    spacing2=0.01,
+    count2=1,
+    flip2=False,
+):
     """
-    特征级线性阵列 (真机查证 2026-09-30, SW2024 SP5)。
+    特征级线性阵列, 支持可选方向 2 (真机查证 2026-09-30, SW2024 SP5)。
 
     FeatureLinearPattern3 实为 10 参 (Num1, Spacing1, Num2, Spacing2,
     FlipDir1, FlipDir2, DName1, DName2, GeometryPattern, VaryInstance);
     DName1/DName2 传字面量 "NULL", 方向信息全部来自预选:
-    种子特征 mark 4 + 方向实体 mark 1。
+    种子特征 mark 4 + 方向 1 实体 mark 1 + 方向 2 实体 mark 2。
+    双向网格真机验证: 4x3 阵列闭式解体积 0.000% 偏差;
+    尺寸后缀 D1=数量1, D2=数量2, D3=间距1(米), D4=间距2(米)。
+
+    方向实体只支持已消费草图中的构造中心线段 (对象级 Select2):
+    基准轴/模型边线虽在文档口径中列出, 真机验证被拒绝
+    (GetErrorCode=51 swSketchErrorExtRefFail, 实例坍缩), 见
+    tests/probe_dir2_axis.py 与 references/part-modeling.md。
 
     参数:
         feature_name: 被阵列特征名 (BODYFEATURE, mark 4)
-        direction_segment: 方向实体对象 (草图构造中心线段/边线, mark 1)
-        spacing: 间距（米）
-        count: 实例数 (含原始, >=2)
+        direction_segment: 方向 1 实体对象 (草图构造中心线段, mark 1)
+        spacing: 方向 1 间距（米）
+        count: 方向 1 实例数 (含原始, >=2)
         flip: 反转方向 1
+        direction2_segment: 方向 2 实体对象 (mark 2); None = 单方向
+        spacing2: 方向 2 间距（米）, 单方向时占位 0.01
+        count2: 方向 2 实例数 (含原始), 单方向时 1
+        flip2: 反转方向 2
     """
     model.ClearSelection2(True)
     if not _select_by_id(model.Extension, feature_name, "BODYFEATURE", mark=4):
         raise ValueError(f"阵列种子特征选择失败: {feature_name}")
     if not _select_com_object(direction_segment, append=True, mark=1):
-        raise ValueError("线性阵列方向实体选择失败")
+        raise ValueError("线性阵列方向 1 实体选择失败")
+    if direction2_segment is not None:
+        if not _select_com_object(direction2_segment, append=True, mark=2):
+            raise ValueError("线性阵列方向 2 实体选择失败")
     return model.FeatureManager.FeatureLinearPattern3(
         int(count), float(spacing),
-        1, 0.01,
-        bool(flip), False,
+        int(count2), float(spacing2),
+        bool(flip), bool(flip2),
         "NULL", "NULL",
         False, False,
     )
