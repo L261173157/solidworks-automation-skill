@@ -266,7 +266,7 @@ def test_missing_cad_declarations_preserve_execution_but_never_auto_pass(tmp_pat
     result = queue_worker.process_job(path, handlers={"create_shell": handler})
     assert calls == ["reliability"]
     assert result["status"] == "review_required"
-    saved_review = json.loads(Path(result["reviewGatePath"]).read_text())
+    saved_review = json.loads(Path(result["reviewGatePath"]).read_text(encoding="utf-8"))
     assert any(item["id"] == "capability-declaration-review" and item["status"] == "warning" for item in saved_review["checks"])
 
 
