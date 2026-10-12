@@ -136,6 +136,9 @@ def test_import_pdf_parser_skips_duplicate_sys_path_entry(monkeypatch, tmp_path)
 def test_import_pdf_parser_prepends_configured_dir(monkeypatch, tmp_path):
     """@brief fitz 最初导入失败时, 配置目录被插入 sys.path 并从中成功导入。"""
     monkeypatch.setitem(sys.modules, "pymupdf", None)   # 真 fitz 会转 import pymupdf, 一并失败
+    # 全量运行时真实 fitz 可能已被其它测试载入缓存, 先移除 (monkeypatch 结束后还原),
+    # 确保首次导入失败、走配置目录分支。
+    monkeypatch.delitem(sys.modules, "fitz", raising=False)
     candidate_dir = tmp_path / "pdfsdk"
     candidate_dir.mkdir()
     (candidate_dir / "fitz.py").write_text('MARKER = "configured-fitz"\n', encoding="utf-8")

@@ -28,6 +28,10 @@ class FakeVariant:
         pass
 
 
+# 仅在导入 sw_part 期间注入桩模块，导入后还原 sys.modules，避免污染同一
+# pytest 进程中其它测试文件对 sw_connect / sw_preflight 的导入。
+_STUBBED = ("sw_connect", "sw_preflight", "sw_part")
+_saved_modules = {name: sys.modules.get(name) for name in _STUBBED}
 sys.modules["sw_connect"] = types.SimpleNamespace(get_com_member=fake_get_com_member)
 sys.modules["sw_preflight"] = types.SimpleNamespace(
     import_com_dependencies=lambda: (
@@ -36,8 +40,15 @@ sys.modules["sw_preflight"] = types.SimpleNamespace(
         FakeVariant,
     )
 )
-
-import sw_part  # noqa: E402
+sys.modules.pop("sw_part", None)
+try:
+    import sw_part  # noqa: E402
+finally:
+    for _name, _module in _saved_modules.items():
+        if _module is None:
+            sys.modules.pop(_name, None)
+        else:
+            sys.modules[_name] = _module
 
 
 class FakeFeature:

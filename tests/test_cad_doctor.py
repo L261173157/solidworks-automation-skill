@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import runpy
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -17,7 +18,6 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import cad_doctor  # noqa: E402
 import fea_analysis  # noqa: E402
-import sw_connect  # noqa: E402
 
 
 def _patch_doctor_inputs(
@@ -355,7 +355,10 @@ def test_run_doctor_probe_cad_connects_when_registered(monkeypatch):
         calls.update(kwargs)
         return object(), None
 
-    monkeypatch.setattr(sw_connect, "connect_solidworks", fake_connect)
+    # cad_doctor 在运行时才 `from sw_connect import ...`，读取的是当下 sys.modules 中的模块；
+    # 其它测试文件会在收集期替换 sys.modules["sw_connect"]，因此直接注入桩模块，
+    # 保证无论执行顺序如何都不会连到真实 SolidWorks。
+    monkeypatch.setitem(sys.modules, "sw_connect", types.SimpleNamespace(connect_solidworks=fake_connect))
 
     result = cad_doctor.run_doctor(probe_cad=True)
 
