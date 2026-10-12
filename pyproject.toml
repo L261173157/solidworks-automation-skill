@@ -30,3 +30,16 @@ package = false
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+# 统计范围: 核心脚本库、MCP 服务器、桌面端(含 GUI)、subskills 脚本。
+# tests/、examples/、src-tauri/resources/skill 镜像副本均在 source 之外, 天然不计入。
+source = ["scripts", "mcp-server", "apps/desktop", "subskills"]
+disable_warnings = ["no-data-collected"]
+
+[tool.coverage.report]
+# 全语言口径中的 Python 门禁: 语句+分支均须 100%
+fail_under = 100
+show_missing = true
+skip_empty = true
